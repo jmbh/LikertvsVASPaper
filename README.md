@@ -1,4 +1,4 @@
-## This is a reproducibility archive for the paper "Comparing Likert and Visual Analogue Scales in Ecological Momentary Assessment" (Preprint: XXX)
+## This is a reproducibility archive for the paper "Comparing Likert and Visual Analogue Scales in Ecological Momentary Assessment" (Preprint: https://osf.io/preprints/psyarxiv/yt8xw)
 
 The reproducibility archive contains code- and output files that allow one to in principle fully reproduce all results in the paper. 
 
