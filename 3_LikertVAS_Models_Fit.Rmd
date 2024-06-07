@@ -1,0 +1,2771 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+## Setup
+
+```{r setup}
+
+library(tidyverse)
+library(brms)
+library(psych)
+library(ordbetareg)
+library(magrittr)
+library(tidybayes)        # Manipulate Stan objects in a tidy way
+library(broom)            # Convert model objects to data frames
+library(broom.mixed)      # Convert brms model objects to data frames
+library(ggdist)           # Special geoms for posterior distributions
+library(gghalves)         # Special half geoms
+library(ggbeeswarm)       # Special distribution-shaped point jittering
+library(ggrepel)          # Automatically position labels
+library(patchwork)        # Combine ggplot objects
+library(scales)           # Format numbers in nice ways
+library(marginaleffects)  # Calculate marginal effects for regression models
+library(modelsummary)     # Create side-by-side regression tables
+library(ggthemes) # e.g. clean theme
+library(tidybayes)
+library(bayesplot)
+library(gridExtra) # Arrange multiple plots in one
+library(lme4) #ML models for correlations
+library(sjPlot)
+library(rsq)
+
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+```
+
+
+## Data load
+
+```{r}
+
+#LikVAS <- readRDS("AggregateData_Fig1_Feb15_24_v2.RDS")
+
+LikVAS <- readRDS("LikertvsVAS-main/Files/AggData.RDS")
+
+str(LikVAS)
+
+durations <- readRDS("LikertvsVAS-main/Files/Duration.Rds")
+
+NA_prop <- readRDS("NA_prop.RDS")
+
+data_post <- readRDS("LikertvsVAS-main/Files/data_PostQuestions.RDS")
+
+```
+
+## Means
+
+### Means: Data preps
+
+```{r Means.datapreps}
+
+# [1] "Means"    "SDs"     
+# [3] "RMSSD"    "AR"      
+# [5] "CorLag0"  "Modality"
+# [7] "Skew"     "IEB"
+
+describe(LikVAS$Means$VAS)
+
+lv_m <- rbind(LikVAS$Means$Lik,
+              LikVAS$Means$VAS,
+              LikVAS$Means$VAS2Lik)
+
+lv_m$format <- c(rep("Likert", length(LikVAS$Means$Lik[[1]])),
+                 rep("VAS", length(LikVAS$Means$VAS[[1]])),
+                 rep("Likert to VAS", length(LikVAS$Means$VAS2Lik[[1]])))
+
+lv_m$ID <- c(1:length(LikVAS$Means$Lik[[1]]),
+             (length(LikVAS$Means$Lik[[1]])+1):(length(LikVAS$Means$Lik[[1]])+length(LikVAS$Means$VAS[[1]])),
+                 (length(LikVAS$Means$Lik[[1]])+1):(length(LikVAS$Means$Lik[[1]])+length(LikVAS$Means$VAS[[1]])))
+
+str(lv_m)
+
+lv_m_long <- lv_m %>%
+  pivot_longer(-c(ID, format),
+               names_to = "Item",
+               values_to = "Mean") %>%
+  mutate(valence = fct_recode(Item,
+                              "positive" = "Energetic",
+                              "positive" = "Happy",
+                              "positive" = "Look Forward",
+                              "positive" = "Satiefied (S)",
+                              "positive" = "Satisfied (B)",
+                              "negative" = "Anxious",
+                              "negative" = "Ashamed",
+                              "negative" = "Discomfort",
+                              "negative" = "Disgusted",
+                              "negative" = "Guilty",
+                              "negative" = "Irritated",
+                              "negative" = "Lonely",
+                              "negative" = "Sad",
+                              "negative" = "Stressed")) %>%
+  mutate(valence = fct_relevel(valence, "negative", "positive")) %>%
+  mutate(Item = fct_relevel(Item,
+                             c("Happy",
+                               "Energetic",
+                               "Look Forward",
+                               "Satiefied (S)",
+                               "Satisfied (B)",
+                               "Sad",
+                               "Guilty",
+                               "Ashamed",
+                               "Disgusted",
+                               "Anxious",
+                               "Irritated",
+                               "Discomfort",
+                               "Lonely",
+                               "Stressed"))) %>%
+  mutate(valence = recode(valence,
+                          "negative" = "-1",
+                          "positive" = "1"),
+         valence = as.numeric(as.character(valence)))
+#Valence coded as: -1 negative, 1 positive
+
+sum(lv_m_long$Mean == "0") #125
+sum(lv_m_long$Mean == "1") #0
+
+#needs a zero-inflated beta...
+
+ggplot(lv_m_long, aes(x = Mean)) +
+  geom_histogram()
+
+save(lv_m_long, file = "lv_m_long.Rdata")
+
+```
+
+### Means: Model fitting
+
+```{r Means.modelfitting}
+
+#prepare data: no LikerttoVAS
+lv_m_long_noLiktoVAS <- lv_m_long %>% filter(format != "Likert to VAS")
+
+## zero inflated multilevel beta regression
+
+# define model
+mod_Mean_zib <- bf(Mean ~ format*valence + (1 + valence|ID) + (1 + format|Item),
+                    phi ~ format*valence,
+                    zi ~ format*valence
+                    )
+
+#set priors
+priors_Mean_zib_noLiktoVAS <- c(set_prior("normal(0.1, 0.2)", class = "b", coef = "formatVAS"),
+                      set_prior("normal(0.2, 0.2)", class = "b", coef = "valence"),
+  set_prior("normal(0.0, 0.2)", class = "b", coef = "formatVAS:valence"),
+  ##phi weights
+  set_prior("normal(0.1, 0.2)", class = "b", coef = "formatVAS", dpar = "phi"),
+                      set_prior("normal(0.2, 0.2)", class = "b", coef = "valence", dpar = "phi"),
+  set_prior("normal(0.0, 0.2)", class = "b", coef = "formatVAS:valence", dpar = "phi"),
+  ##zi
+  set_prior("normal(0.1, 0.2)", class = "b", coef = "formatVAS", dpar = "zi"),
+                      set_prior("normal(0.2, 0.2)", class = "b", coef = "valence", dpar = "zi"),
+  set_prior("normal(0.0, 0.2)", class = "b", coef = "formatVAS:valence", dpar = "zi"),
+  ##rest
+                      set_prior("student_t(3, 0.1, 1)", class = "Intercept"),
+                      set_prior("lkj(3)", class = "cor", group = "ID"),
+                      set_prior("lkj(3)", class = "cor", group = "Item"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "Intercept", group = "ID"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "valence", group = "ID"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "Intercept", group = "Item"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "formatVAS", group = "Item"))
+
+#fit model
+mod_Mean_zib_noLiktoVAS_fit <- brm(mod_Mean_zib, data = lv_m_long_noLiktoVAS, family = zero_inflated_beta(), chains = 3, cores = 3, control=list(adapt_delta=0.80), warmup = 1000, iter = 2000,
+                         prior = priors_Mean_zib_noLiktoVAS)
+
+#export fitted model object
+save(mod_Mean_zib_noLiktoVAS_fit, file = "mod_Mean_zib_noLiktoVAS_fit.Rdata")
+
+### Check: Gaussian model
+
+mod_Mean_normal_noLiktoVAS_fit <- brm(bf(Mean ~ format*valence + (1 + valence|ID) + (1 + format|Item), sigma ~ format*valence) , data = lv_m_long_noLiktoVAS, chains = 3, cores = 3, control=list(adapt_delta=0.80), warmup = 1000, iter = 2000)
+
+#export fitted model object
+save(mod_Mean_normal_noLiktoVAS_fit, file = "mod_Mean_normal_noLiktoVAS_fit.Rdata")
+
+```
+
+
+### Means: VAS2Lik: VAS2Likert-mapping process explanation for means
+
+How much of the difference between the mean item correlation on VAS and Likert is explained by the VAS to Likert mapping-process?
+
+```{r Means.mapping}
+
+### Data preps
+
+data_Lik <- readRDS("LikertvsVAS-main/Files/data_ESM_Lik_incl.RDS")
+length(unique(data_Lik$Name))
+data_VAS <- readRDS("LikertvsVAS-main/Files/data_ESM_VAS_incl.RDS")
+length(unique(data_VAS$Name))
+
+
+NA_prop <- readRDS("NA_prop.RDS")
+
+NA_prop_Lik <- NA_prop[[1]][NA_prop[[1]]$Name %in% data_Lik$Name, ]
+NA_prop_VAS <- NA_prop[[2]][NA_prop[[2]]$Name %in% data_VAS$Name, ]
+
+dim(NA_prop_Lik)
+dim(NA_prop_VAS)
+
+lv_m <- rbind(LikVAS$Means$Lik,
+              LikVAS$Means$VAS,
+              LikVAS$Means$VAS2Lik)
+
+lv_m$format <- c(rep("Likert", length(LikVAS$Means$Lik[[1]])),
+                 rep("VAS", length(LikVAS$Means$VAS[[1]])),
+                 rep("Likert to VAS", length(LikVAS$Means$VAS2Lik[[1]])))
+
+lv_m$ID <- c(1:length(LikVAS$Means$Lik[[1]]),
+             (length(LikVAS$Means$Lik[[1]])+1):(length(LikVAS$Means$Lik[[1]])+length(LikVAS$Means$VAS[[1]])),
+                 (length(LikVAS$Means$Lik[[1]])+1):(length(LikVAS$Means$Lik[[1]])+length(LikVAS$Means$VAS[[1]])))
+
+lv_m_Name <- lv_m %>% mutate(Name = c(NA_prop_Lik$Name,
+                                      NA_prop_VAS$Name,
+                                      NA_prop_VAS$Name))
+
+lv_m_Name_long <- lv_m_Name %>%
+  pivot_longer(-c(ID, format, Name),
+               names_to = "Item",
+               values_to = "Mean") %>%
+  mutate(valence = fct_recode(Item,
+                              "valence" = "Energetic",
+                              "valence" = "Happy",
+                              "valence" = "Look Forward",
+                              "valence" = "Satiefied (S)",
+                              "valence" = "Satisfied (B)",
+                              "negative" = "Anxious",
+                              "negative" = "Ashamed",
+                              "negative" = "Discomfort",
+                              "negative" = "Disgusted",
+                              "negative" = "Guilty",
+                              "negative" = "Irritated",
+                              "negative" = "Lonely",
+                              "negative" = "Sad",
+                              "negative" = "Stressed")) %>%
+  mutate(valence = fct_relevel(valence, "negative", "valence")) %>%
+  mutate(Item = fct_relevel(Item,
+                             c("Happy",
+                               "Energetic",
+                               "Look Forward",
+                               "Satiefied (S)",
+                               "Satisfied (B)",
+                               "Sad",
+                               "Guilty",
+                               "Ashamed",
+                               "Disgusted",
+                               "Anxious",
+                               "Irritated",
+                               "Discomfort",
+                               "Lonely",
+                               "Stressed"))) %>%
+  mutate(valence = recode(valence,
+                          "negative" = "-1",
+                          "valence" = "1"),
+         valence = as.numeric(as.character(valence)))
+
+### Model fitting
+
+mod_Mean_zib <- bf(Mean ~ format*valence + (1 + valence|ID) + (1 + format|Item),
+                    phi ~ format*valence,
+                    zi ~ format*valence
+                    )
+
+#set priors
+priors_Mean_zib <- c(set_prior("normal(0.1, 0.2)", class = "b", coef = "formatVAS"),
+                             set_prior("normal(0.1, 0.2)", class = "b", coef = "formatVAS2Lik"),
+                      set_prior("normal(0.2, 0.2)", class = "b", coef = "valence"),
+                      set_prior("normal(0.0, 0.2)", class = "b", coef = "formatVAS:valence"),
+                      set_prior("normal(0.0, 0.2)", class = "b", coef = "formatVAS2Lik:valence"),
+                      ##phi weights
+                      set_prior("normal(0.1, 0.2)", class = "b", coef = "formatVAS", dpar = "phi"),
+                      set_prior("normal(0.1, 0.2)", class = "b", coef = "formatVAS2Lik", dpar = "phi"),
+                      set_prior("normal(0.2, 0.2)", class = "b", coef = "valence", dpar = "phi"),
+                      set_prior("normal(0.0, 0.2)", class = "b", coef = "formatVAS:valence", dpar = "phi"),
+                      set_prior("normal(0.0, 0.2)", class = "b", coef = "formatVAS2Lik:valence", dpar = "phi"),
+                      ##zi
+                      set_prior("normal(0.1, 0.2)", class = "b", coef = "formatVAS", dpar = "zi"),
+                      set_prior("normal(0.1, 0.2)", class = "b", coef = "formatVAS2Lik", dpar = "zi"),
+                      set_prior("normal(0.2, 0.2)", class = "b", coef = "valence", dpar = "zi"),
+                      set_prior("normal(0.0, 0.2)", class = "b", coef = "formatVAS:valence", dpar = "zi"),
+                      set_prior("normal(0.0, 0.2)", class = "b", coef = "formatVAS2Lik:valence", dpar = "zi"),
+                      ##rest
+                      set_prior("student_t(3, 0.1, 1)", class = "Intercept"),
+                      set_prior("lkj(3)", class = "cor", group = "ID"),
+                      set_prior("lkj(3)", class = "cor", group = "Item"),
+                      set_prior("student_t(3, 0, 1)", class = "sd", coef = "Intercept", group = "ID"),
+                      set_prior("student_t(3, 0, 1)", class = "sd", coef = "valence", group = "ID"),
+                      set_prior("student_t(3, 0, 1)", class = "sd", coef = "Intercept", group = "Item"),
+                      set_prior("student_t(3, 0, 1)", class = "sd", coef = "formatVAS", group = "Item"),
+                      set_prior("student_t(3, 0, 1)", class = "sd", coef = "formatVAS2Lik", group = "Item"))
+table(lv_m_long$format)
+
+## Model fitting
+
+mod_Mean_zib_fit <- brm(mod_Mean_zib, data = lv_m_long %>% mutate(format = fct_recode(format,
+                                                                                      "VAS2Lik" = "Likert to VAS")), family = zero_inflated_beta(), chains = 3, cores = 3, control=list(adapt_delta=0.95), warmup = 1000, iter = 2000,
+                         prior = priors_Mean_zib)
+
+#export fitted model object
+save(mod_Mean_zib_fit, file = "mod_Mean_zib_fit.Rdata")
+
+```
+
+
+## SDs
+
+### SDs: Data preps
+
+```{r SDs.datapreps}
+
+# [1] "Means"    "SDs"     
+# [3] "RMSSD"    "AR"      
+# [5] "CorLag0"  "Modality"
+# [7] "Skew"     "IEB"
+
+names(LikVAS)
+lv_SD <- rbind(LikVAS$SDs$Lik,
+              LikVAS$SDs$VAS,
+              LikVAS$SDs$VAS2Lik)
+
+lv_SD$format <- c(rep("Likert", length(LikVAS$SDs$Lik[[1]])),
+                 rep("VAS", length(LikVAS$SDs$VAS[[1]])),
+                 rep("Likert to VAS", length(LikVAS$SDs$VAS2Lik[[1]])))
+
+lv_SD$ID <- c(1:length(LikVAS$SDs$Lik[[1]]),
+             (length(LikVAS$SDs$Lik[[1]])+1):(length(LikVAS$SDs$Lik[[1]])+length(LikVAS$SDs$VAS[[1]])),
+                 (length(LikVAS$SDs$Lik[[1]])+1):(length(LikVAS$SDs$Lik[[1]])+length(LikVAS$SDs$VAS[[1]])))
+
+str(lv_SD)
+
+lv_SD_long <- lv_SD %>%
+  pivot_longer(-c(ID, format),
+               names_to = "Item",
+               values_to = "SD") %>%
+  mutate(valence = fct_recode(Item,
+                              "positive" = "Energetic",
+                              "positive" = "Happy",
+                              "positive" = "Look Forward",
+                              "positive" = "Satiefied (S)",
+                              "positive" = "Satisfied (B)",
+                              "negative" = "Anxious",
+                              "negative" = "Ashamed",
+                              "negative" = "Discomfort",
+                              "negative" = "Disgusted",
+                              "negative" = "Guilty",
+                              "negative" = "Irritated",
+                              "negative" = "Lonely",
+                              "negative" = "Sad",
+                              "negative" = "Stressed")) %>%
+  mutate(valence = fct_relevel(valence, "negative", "positive")) %>%
+  mutate(Item = fct_relevel(Item,
+                             c("Happy",
+                               "Energetic",
+                               "Look Forward",
+                               "Satiefied (S)",
+                               "Satisfied (B)",
+                               "Sad",
+                               "Guilty",
+                               "Ashamed",
+                               "Disgusted",
+                               "Anxious",
+                               "Irritated",
+                               "Discomfort",
+                               "Lonely",
+                               "Stressed"))) %>%
+  mutate(valence = recode(valence,
+                          "negative" = "-1",
+                          "positive" = "1"),
+         valence = as.numeric(as.character(valence)))
+#Valence coded as: -1 negative, 1 positive
+
+sum(lv_SD_long$SD == "0") #125
+sum(lv_SD_long$SD == "1") #0
+
+#zero-inflated beta...
+
+ggplot(lv_SD_long, aes(x = SD)) +
+  geom_histogram()
+
+```
+
+### SDs: Model fitting
+
+```{r SDs.modelfitting}
+
+## zero one inflated multilevel beta regression
+
+mod_SD_zib <- bf(SD ~ format*valence + (1 + valence|ID) + (1 + format|Item),
+                    phi ~ format*valence,
+                    zi ~ format*valence
+                    )
+
+#set priors: without Likert to VAS-data
+priors_SD_zib_noLiktoVAS <- c(set_prior("normal(0.1, 0.2)", class = "b", coef = "formatVAS"),
+                               set_prior("normal(0.2, 0.2)", class = "b", coef = "valence"),
+                               set_prior("normal(0.0, 0.2)", class = "b", coef = "formatVAS:valence"),
+  ##phi weights
+  set_prior("normal(0.1, 0.2)", class = "b", coef = "formatVAS", dpar = "phi"),
+  set_prior("normal(0.2, 0.2)", class = "b", coef = "valence", dpar = "phi"),
+  set_prior("normal(0.0, 0.2)", class = "b", coef = "formatVAS:valence", dpar = "phi"),
+  ##zoi
+  set_prior("normal(0.1, 0.2)", class = "b", coef = "formatVAS", dpar = "zi"),
+  set_prior("normal(0.2, 0.2)", class = "b", coef = "valence", dpar = "zi"),
+  set_prior("normal(0.0, 0.2)", class = "b", coef = "formatVAS:valence", dpar = "zi"),
+  ##rest
+  set_prior("student_t(3, 0.1, 1)", class = "Intercept"),
+  set_prior("lkj(3)", class = "cor", group = "ID"),
+  set_prior("lkj(3)", class = "cor", group = "Item"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "Intercept", group = "ID"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "valence", group = "ID"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "Intercept", group = "Item"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "formatVAS", group = "Item"))
+
+#exclude LikerttoVAS-data
+lv_SD_long_noLiktoVAS <- lv_SD_long %>% filter(format != "Likert to VAS")
+
+#Model fitting
+mod_SD_zib_noLiktoVAS_fit <- brm(mod_SD_zib, data = lv_SD_long_noLiktoVAS, family = zero_inflated_beta(), chains = 3, cores = 3, control=list(adapt_delta=0.80), warmup = 1000, iter = 2000,
+                         prior = priors_SD_zib_noLiktoVAS)
+
+save(mod_SD_zib_noLiktoVAS_fit, file = "mod_SD_zib_noLiktoVAS_fit.Rdata")
+
+
+```
+
+## Mean item correlations
+
+### Mean item correlations: Data preps
+
+```{r CorLag0.datapreps}
+
+# [1] "Means"    "SDs"     
+# [3] "RMSSD"    "AR"      
+# [5] "CorLag0"  "Modality"
+# [7] "Skew"     "IEB"
+
+names(LikVAS)
+lv_CorLag0 <- rbind(LikVAS$CorLag0$Lik,
+              LikVAS$CorLag0$VAS,
+              LikVAS$CorLag0$VAS2Lik)
+
+lv_CorLag0$format <- c(rep("Likert", length(LikVAS$CorLag0$Lik[[1]])),
+                 rep("VAS", length(LikVAS$CorLag0$VAS[[1]])),
+                 rep("Likert to VAS", length(LikVAS$CorLag0$VAS2Lik[[1]])))
+
+lv_CorLag0$ID <- c(1:length(LikVAS$CorLag0$Lik[[1]]),
+             (length(LikVAS$CorLag0$Lik[[1]])+1):(length(LikVAS$CorLag0$Lik[[1]])+length(LikVAS$CorLag0$VAS[[1]])),
+                 (length(LikVAS$CorLag0$Lik[[1]])+1):(length(LikVAS$CorLag0$Lik[[1]])+length(LikVAS$CorLag0$VAS[[1]])))
+
+str(lv_CorLag0)
+
+lv_CorLag0_long <- lv_CorLag0 %>%
+  pivot_longer(-c(ID, format),
+               names_to = "Item",
+               values_to = "CorLag0") %>%
+  mutate(valence = fct_recode(Item,
+                              "positive" = "Energetic",
+                              "positive" = "Happy",
+                              "positive" = "Look Forward",
+                              "positive" = "Satiefied (S)",
+                              "positive" = "Satisfied (B)",
+                              "negative" = "Anxious",
+                              "negative" = "Ashamed",
+                              "negative" = "Discomfort",
+                              "negative" = "Disgusted",
+                              "negative" = "Guilty",
+                              "negative" = "Irritated",
+                              "negative" = "Lonely",
+                              "negative" = "Sad",
+                              "negative" = "Stressed")) %>%
+  mutate(valence = fct_relevel(valence, "negative", "positive")) %>%
+  mutate(Item = fct_relevel(Item,
+                             c("Happy",
+                               "Energetic",
+                               "Look Forward",
+                               "Satiefied (S)",
+                               "Satisfied (B)",
+                               "Sad",
+                               "Guilty",
+                               "Ashamed",
+                               "Disgusted",
+                               "Anxious",
+                               "Irritated",
+                               "Discomfort",
+                               "Lonely",
+                               "Stressed"))) %>%
+  mutate(valence = recode(valence,
+                          "negative" = "-1",
+                          "positive" = "1"),
+         valence = as.numeric(as.character(valence)))
+#Valence coded as: -1 negative, 1 positive
+
+sum(lv_CorLag0_long$CorLag0 == "0") #0
+sum(lv_CorLag0_long$CorLag0 == "1") #0
+
+#non-inflated beta... eeeasycheese :)
+
+ggplot(lv_CorLag0_long, aes(x = CorLag0)) +
+  geom_histogram()
+
+```
+
+### Mean item correlations: Model fitting
+
+```{r CorLag0.modelfitting}
+
+## multilevel beta regression
+
+mod_CorLag0_beta <- bf(CorLag0 ~ format*valence + (1 + valence|ID) + (1 + format|Item),
+                    phi ~ format*valence
+                    )
+
+
+## without Likert to VAS-data
+
+priors_CorLag0_beta_noLiktoVAS <- c(set_prior("normal(0.1, 0.2)", class = "b", coef = "formatVAS"),
+                               set_prior("normal(0.2, 0.2)", class = "b", coef = "valence"),
+                               set_prior("normal(0.0, 0.2)", class = "b", coef = "formatVAS:valence"),
+  ##phi weights
+  set_prior("normal(0.1, 0.2)", class = "b", coef = "formatVAS", dpar = "phi"),
+  set_prior("normal(0.2, 0.2)", class = "b", coef = "valence", dpar = "phi"),
+  set_prior("normal(0.0, 0.2)", class = "b", coef = "formatVAS:valence", dpar = "phi"),
+  ##rest
+  set_prior("student_t(3, 0.1, 1)", class = "Intercept"),
+  set_prior("lkj(3)", class = "cor", group = "ID"),
+  set_prior("lkj(3)", class = "cor", group = "Item"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "Intercept", group = "ID"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "valence", group = "ID"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "Intercept", group = "Item"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "formatVAS", group = "Item"))
+
+lv_CorLag0_long_noLiktoVAS <- lv_CorLag0_long %>% filter(format != "Likert to VAS")
+
+mod_CorLag0_beta_noLiktoVAS_fit <- brm(mod_CorLag0_beta, data = lv_CorLag0_long_noLiktoVAS, family = Beta(), chains = 3, cores = 3, control=list(adapt_delta=0.80), warmup = 1000, iter = 2000,
+                         prior = priors_CorLag0_beta_noLiktoVAS)
+
+save(mod_CorLag0_beta_noLiktoVAS_fit, file = "mod_CorLag0_beta_noLiktoVAS_fit.Rdata")
+
+mod_CorLag0_beta_fit <- brm(mod_CorLag0_beta, data = lv_CorLag0_long, family = Beta(), chains = 3, cores = 3, control=list(adapt_delta=0.80), warmup = 1000, iter = 2000,
+                         prior = priors_CorLag0_beta_noLiktoVAS)
+
+save(mod_CorLag0_beta_fit, file = "mod_CorLag0_beta_fit.Rdata")
+
+
+```
+
+## Skewnesses
+
+### Skewnesses: Data preps
+
+```{r skew.datapreps}
+
+# [1] "Means"    "SDs"     
+# [3] "RMSSD"    "AR"      
+# [5] "CorLag0"  "Modality"
+# [7] "Skew"     "IEB"
+
+names(LikVAS)
+lv_Skew <- rbind(LikVAS$Skew$Lik,
+              LikVAS$Skew$VAS,
+              LikVAS$Skew$VAS2Lik)
+
+lv_Skew$format <- c(rep("Likert", length(LikVAS$Skew$Lik[[1]])),
+                 rep("VAS", length(LikVAS$Skew$VAS[[1]])),
+                 rep("Likert to VAS", length(LikVAS$Skew$VAS2Lik[[1]])))
+
+lv_Skew$ID <- c(1:length(LikVAS$Skew$Lik[[1]]),
+             (length(LikVAS$Skew$Lik[[1]])+1):(length(LikVAS$Skew$Lik[[1]])+length(LikVAS$Skew$VAS[[1]])),
+                 (length(LikVAS$Skew$Lik[[1]])+1):(length(LikVAS$Skew$Lik[[1]])+length(LikVAS$Skew$VAS[[1]])))
+
+str(lv_Skew)
+
+lv_Skew_long <- lv_Skew %>%
+  pivot_longer(-c(ID, format),
+               names_to = "Item",
+               values_to = "Skew") %>%
+  mutate(valence = fct_recode(Item,
+                              "positive" = "Energetic",
+                              "positive" = "Happy",
+                              "positive" = "Look Forward",
+                              "positive" = "Satiefied (S)",
+                              "positive" = "Satisfied (B)",
+                              "negative" = "Anxious",
+                              "negative" = "Ashamed",
+                              "negative" = "Discomfort",
+                              "negative" = "Disgusted",
+                              "negative" = "Guilty",
+                              "negative" = "Irritated",
+                              "negative" = "Lonely",
+                              "negative" = "Sad",
+                              "negative" = "Stressed")) %>%
+  mutate(valence = fct_relevel(valence, "negative", "positive")) %>%
+  mutate(Item = fct_relevel(Item,
+                             c("Happy",
+                               "Energetic",
+                               "Look Forward",
+                               "Satiefied (S)",
+                               "Satisfied (B)",
+                               "Sad",
+                               "Guilty",
+                               "Ashamed",
+                               "Disgusted",
+                               "Anxious",
+                               "Irritated",
+                               "Discomfort",
+                               "Lonely",
+                               "Stressed"))) %>%
+  mutate(valence = recode(valence,
+                          "negative" = "-1",
+                          "positive" = "1"),
+         valence = as.numeric(as.character(valence)))
+#Valence coded as: -1 negative, 1 positive
+
+ggplot(lv_Skew_long, aes(x = Skew)) +
+  geom_histogram()
+
+describeBy(lv_Skew_long$Skew, lv_Skew_long$format)
+
+#Gaussian... eeeasycheese :) If it doesn't fit well, add skewness parameter
+
+```
+
+### Skewnesses: Model fitting
+
+```{r skew.modelfitting}
+
+
+## multilevel regression
+## (skew normal wasn't worth it...)
+
+mod_Skew <- bf(Skew ~ format*valence + (1 + valence|ID) + (1 + format|Item),
+               sigma ~ format*valence)
+
+## without Likert to VAS-data
+
+priors_Skew_noLiktoVAS <- c(set_prior("normal(0, 1)", class = "b", coef = "formatVAS"),
+                            set_prior("normal(0, 1)", class = "b", coef = "valence"),
+                            set_prior("normal(0, 1)", class = "b", coef = "formatVAS:valence"),
+                              ##sigma weights
+  set_prior("normal(0, 1)", class = "b", coef = "formatVAS", dpar = "sigma"),
+  set_prior("normal(0, 1)", class = "b", coef = "valence", dpar = "sigma"),
+  set_prior("normal(0, 1)", class = "b", coef = "formatVAS:valence", dpar = "sigma"),
+  ##rest
+  set_prior("student_t(5, 0, 2)", class = "Intercept"),
+  set_prior("lkj(3)", class = "cor", group = "ID"),
+  set_prior("lkj(3)", class = "cor", group = "Item"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "Intercept", group = "ID"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "valence", group = "ID"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "Intercept", group = "Item"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "formatVAS", group = "Item"))
+
+lv_Skew_long_noLiktoVAS <- lv_Skew_long %>% filter(format != "Likert to VAS")
+
+mod_Skew_noLiktoVAS_fit <- brm(mod_Skew, data = lv_Skew_long_noLiktoVAS, chains = 3, cores = 3, control=list(adapt_delta=0.80), warmup = 1000, iter = 2000,
+                         prior = priors_Skew_noLiktoVAS)
+
+save(mod_Skew_noLiktoVAS_fit, file = "mod_Skew_noLiktoVAS_fit.Rdata")
+
+```
+
+### Skewnesses VAS2Lik: VAS2Likert-mapping process explanation for means: Model fitting
+
+How much of the difference between the mean item correlation on VAS and Likert is explained by the VAS to Likert mapping-process?
+
+```{r skew.VAS2Lik.fit}
+
+mod_Skew <- bf(Skew ~ format*valence + (1 + valence|ID) + (1 + format|Item),
+               sigma ~ format*valence)
+
+## with Likert to VAS-data
+
+priors_Skew <- c(set_prior("normal(0, 1)", class = "b", coef = "formatVAS"),
+                 set_prior("normal(0, 1)", class = "b", coef = "valence"),
+                 set_prior("normal(0, 1)", class = "b", coef = "formatVAS:valence"),
+                              ##sigma weights
+  set_prior("normal(0, 1)", class = "b", coef = "formatVAS", dpar = "sigma"),
+  set_prior("normal(0, 1)", class = "b", coef = "valence", dpar = "sigma"),
+  set_prior("normal(0, 1)", class = "b", coef = "formatVAS:valence", dpar = "sigma"),
+  ##rest
+  set_prior("student_t(5, 0, 2)", class = "Intercept"),
+  set_prior("lkj(3)", class = "cor", group = "ID"),
+  set_prior("lkj(3)", class = "cor", group = "Item"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "Intercept", group = "ID"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "valence", group = "ID"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "Intercept", group = "Item"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "formatVAS", group = "Item"))
+
+mod_Skew_fit <- brm(mod_Skew, data = lv_Skew_long, chains = 3, cores = 3, control=list(adapt_delta=0.80), warmup = 1000, iter = 2000,
+                         prior = priors_Skew)
+
+save(mod_Skew_fit, file = "mod_Skew_fit.Rdata")
+
+```
+
+## RMSSD
+
+### RMSSD: Data preps
+
+```{r RMSSD.datapreps}
+
+# [1] "Means"    "SDs"     
+# [3] "RMSSD"    "AR"      
+# [5] "CorLag0"  "Modality"
+# [7] "Skew"     "IEB"
+
+lv_RMSSD <- rbind(LikVAS$RMSSD$Lik,
+              LikVAS$RMSSD$VAS,
+              LikVAS$RMSSD$VAS2Lik)
+
+lv_RMSSD$format <- c(rep("Likert", length(LikVAS$RMSSD$Lik[[1]])),
+                 rep("VAS", length(LikVAS$RMSSD$VAS[[1]])),
+                 rep("Likert to VAS", length(LikVAS$RMSSD$VAS2Lik[[1]])))
+
+lv_RMSSD$ID <- c(1:length(LikVAS$RMSSD$Lik[[1]]),
+             (length(LikVAS$RMSSD$Lik[[1]])+1):(length(LikVAS$RMSSD$Lik[[1]])+length(LikVAS$RMSSD$VAS[[1]])),
+                 (length(LikVAS$RMSSD$Lik[[1]])+1):(length(LikVAS$RMSSD$Lik[[1]])+length(LikVAS$RMSSD$VAS[[1]])))
+
+str(lv_RMSSD)
+
+lv_RMSSD_long <- lv_RMSSD %>%
+  pivot_longer(-c(ID, format),
+               names_to = "Item",
+               values_to = "RMSSD") %>%
+  mutate(valence = fct_recode(Item,
+                              "positive" = "Energetic",
+                              "positive" = "Happy",
+                              "positive" = "Look Forward",
+                              "positive" = "Satiefied (S)",
+                              "positive" = "Satisfied (B)",
+                              "negative" = "Anxious",
+                              "negative" = "Ashamed",
+                              "negative" = "Discomfort",
+                              "negative" = "Disgusted",
+                              "negative" = "Guilty",
+                              "negative" = "Irritated",
+                              "negative" = "Lonely",
+                              "negative" = "Sad",
+                              "negative" = "Stressed")) %>%
+  mutate(valence = fct_relevel(valence, "negative", "positive")) %>%
+  mutate(Item = fct_relevel(Item,
+                             c("Happy",
+                               "Energetic",
+                               "Look Forward",
+                               "Satiefied (S)",
+                               "Satisfied (B)",
+                               "Sad",
+                               "Guilty",
+                               "Ashamed",
+                               "Disgusted",
+                               "Anxious",
+                               "Irritated",
+                               "Discomfort",
+                               "Lonely",
+                               "Stressed"))) %>%
+  mutate(valence = recode(valence,
+                          "negative" = "-1",
+                          "positive" = "1"),
+         valence = as.numeric(as.character(valence)))
+#Valence coded as: -1 negative, 1 positive
+
+sum(lv_RMSSD_long$RMSSD == "0", na.rm = TRUE) #51
+sum(lv_RMSSD_long$RMSSD == "1", na.rm = TRUE) #0
+
+#zero-inflated beta...
+
+ggplot(lv_RMSSD_long, aes(x = RMSSD)) +
+  geom_histogram()
+
+```
+
+### RMSSD: Model fitting
+
+```{r RMSSD.modelfitting}
+
+## zero inflated multilevel beta regression
+
+mod_RMSSD_zib <- bf(RMSSD ~ format*valence + (1 + valence|ID) + (1 + format|Item),
+                    phi ~ format*valence,
+                    zi ~ format*valence
+                    )
+
+
+## without Likert to VAS-data
+
+priors_RMSSD_zib_noLiktoVAS <- c(set_prior("normal(0.1, 0.2)", class = "b", coef = "formatVAS"),
+                      set_prior("normal(0.2, 0.2)", class = "b", coef = "valence"),
+  set_prior("normal(0.0, 0.2)", class = "b", coef = "formatVAS:valence"),
+  ##phi weights
+  set_prior("normal(0.1, 0.2)", class = "b", coef = "formatVAS", dpar = "phi"),
+                      set_prior("normal(0.2, 0.2)", class = "b", coef = "valence", dpar = "phi"),
+  set_prior("normal(0.0, 0.2)", class = "b", coef = "formatVAS:valence", dpar = "phi"),
+  ##zi
+  set_prior("normal(0.1, 0.2)", class = "b", coef = "formatVAS", dpar = "zi"),
+                      set_prior("normal(0.2, 0.2)", class = "b", coef = "valence", dpar = "zi"),
+  set_prior("normal(0.0, 0.2)", class = "b", coef = "formatVAS:valence", dpar = "zi"),
+  ##rest
+                      set_prior("student_t(3, 0.1, 1)", class = "Intercept"),
+                      set_prior("lkj(3)", class = "cor", group = "ID"),
+                      set_prior("lkj(3)", class = "cor", group = "Item"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "Intercept", group = "ID"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "valence", group = "ID"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "Intercept", group = "Item"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "formatVAS", group = "Item"))
+
+lv_RMSSD_long_noLiktoVAS <- lv_RMSSD_long %>% filter(format != "Likert to VAS")
+
+mod_RMSSD_zib_noLiktoVAS_fit <- brm(mod_RMSSD_zib, data = lv_RMSSD_long_noLiktoVAS, family = zero_inflated_beta(), chains = 3, cores = 3, control=list(adapt_delta=0.80), warmup = 1000, iter = 2000,
+                         prior = priors_RMSSD_zib_noLiktoVAS)
+
+save(mod_RMSSD_zib_noLiktoVAS_fit, file = "mod_RMSSD_zib_noLiktoVAS_fit.Rdata")
+
+## With VAS to Likert-mapping included
+
+mod_RMSSD_zib_fit <- brm(mod_RMSSD_zib, data = lv_RMSSD_long, family = zero_inflated_beta(), chains = 3, cores = 3, control=list(adapt_delta=0.80), warmup = 1000, iter = 2000,
+                         prior = priors_RMSSD_zib_noLiktoVAS)
+
+save(mod_RMSSD_zib_fit, file = "mod_RMSSD_zib_fit.Rdata")
+
+```
+
+## AR
+
+### AR: Data preps
+
+```{r AR.datapreps}
+
+# [1] "Means"    "SDs"     
+# [3] "RMSSD"    "AR"      
+# [5] "CorLag0"  "Modality"
+# [7] "Skew"     "IEB"
+
+lv_AR <- rbind(LikVAS$AR$Lik,
+              LikVAS$AR$VAS,
+              LikVAS$AR$VAS2Lik)
+
+lv_AR$format <- c(rep("Likert", length(LikVAS$AR$Lik[[1]])),
+                 rep("VAS", length(LikVAS$AR$VAS[[1]])),
+                 rep("Likert to VAS", length(LikVAS$AR$VAS2Lik[[1]])))
+
+lv_AR$ID <- c(1:length(LikVAS$AR$Lik[[1]]),
+             (length(LikVAS$AR$Lik[[1]])+1):(length(LikVAS$AR$Lik[[1]])+length(LikVAS$AR$VAS[[1]])),
+                 (length(LikVAS$AR$Lik[[1]])+1):(length(LikVAS$AR$Lik[[1]])+length(LikVAS$AR$VAS[[1]])))
+
+str(lv_AR)
+
+lv_AR_long <- lv_AR %>%
+  pivot_longer(-c(ID, format),
+               names_to = "Item",
+               values_to = "AR") %>%
+  mutate(valence = fct_recode(Item,
+                              "positive" = "Energetic",
+                              "positive" = "Happy",
+                              "positive" = "Look Forward",
+                              "positive" = "Satiefied (S)",
+                              "positive" = "Satisfied (B)",
+                              "negative" = "Anxious",
+                              "negative" = "Ashamed",
+                              "negative" = "Discomfort",
+                              "negative" = "Disgusted",
+                              "negative" = "Guilty",
+                              "negative" = "Irritated",
+                              "negative" = "Lonely",
+                              "negative" = "Sad",
+                              "negative" = "Stressed")) %>%
+  mutate(valence = fct_relevel(valence, "negative", "positive")) %>%
+  mutate(Item = fct_relevel(Item,
+                             c("Happy",
+                               "Energetic",
+                               "Look Forward",
+                               "Satiefied (S)",
+                               "Satisfied (B)",
+                               "Sad",
+                               "Guilty",
+                               "Ashamed",
+                               "Disgusted",
+                               "Anxious",
+                               "Irritated",
+                               "Discomfort",
+                               "Lonely",
+                               "Stressed"))) %>%
+  mutate(valence = recode(valence,
+                          "negative" = "-1",
+                          "positive" = "1"),
+         valence = as.numeric(as.character(valence)))
+#Valence coded as: -1 negative, 1 positive
+
+sum(lv_AR_long$AR == "0", na.rm = TRUE) #0
+sum(lv_AR_long$AR == "1", na.rm = TRUE) #7
+
+#one-inflated (?) Gaussian...
+
+ggplot(lv_AR_long, aes(x = AR)) +
+  geom_histogram()
+
+```
+
+### AR: Model fitting
+
+```{r AR.modelfitting}
+
+## multilevel regression
+
+mod_AR <- bf(AR ~ format*valence + (1 + valence|ID) + (1 + format|Item),
+               sigma ~ format*valence)
+
+## without Likert to VAS-data
+
+priors_AR_noLiktoVAS <- c(set_prior("normal(0, 1)", class = "b", coef = "formatVAS"),
+                            set_prior("normal(0, 1)", class = "b", coef = "valence"),
+                            set_prior("normal(0, 1)", class = "b", coef = "formatVAS:valence"),
+                              ##sigma weights
+  set_prior("normal(0, 1)", class = "b", coef = "formatVAS", dpar = "sigma"),
+  set_prior("normal(0, 1)", class = "b", coef = "valence", dpar = "sigma"),
+  set_prior("normal(0, 1)", class = "b", coef = "formatVAS:valence", dpar = "sigma"),
+  ##rest
+  set_prior("student_t(5, 0, 2)", class = "Intercept"),
+  set_prior("lkj(3)", class = "cor", group = "ID"),
+  set_prior("lkj(3)", class = "cor", group = "Item"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "Intercept", group = "ID"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "valence", group = "ID"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "Intercept", group = "Item"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "formatVAS", group = "Item"))
+
+lv_AR_long_noLiktoVAS <- lv_AR_long %>% filter(format != "Likert to VAS")
+
+mod_AR_noLiktoVAS_fit <- brm(mod_AR, data = lv_AR_long_noLiktoVAS, chains = 3, cores = 3, control=list(adapt_delta=0.80), warmup = 1000, iter = 2000,
+                         prior = priors_AR_noLiktoVAS)
+
+save(mod_AR_noLiktoVAS_fit, file = "mod_AR_noLiktoVAS_fit.Rdata")
+
+#With mapping process included
+
+mod_AR_fit <- brm(mod_AR, data = lv_AR_long, chains = 3, cores = 3, control=list(adapt_delta=0.80), warmup = 1000, iter = 2000,
+                         prior = priors_AR_noLiktoVAS)
+
+save(mod_AR_fit, file = "mod_AR_fit.Rdata")
+
+```
+
+## IEB
+
+### IEB: Data preps
+
+```{r AR}
+
+# [1] "Means"    "SDs"     
+# [3] "RMSSD"    "AR"      
+# [5] "CorLag0"  "Modality"
+# [7] "Skew"     "IEB"
+
+lv_IEB <- rbind(LikVAS$IEB$Lik,
+              LikVAS$IEB$VAS,
+              LikVAS$IEB$VAS2Lik) %>% as.data.frame()
+#The IEB-data seem to be fucked;
+
+lv_IEB$format <- c(rep("Likert", length(LikVAS$IEB$Lik[[1]])),
+                 rep("VAS", length(LikVAS$IEB$VAS[[1]])),
+                 rep("Likert to VAS", length(LikVAS$IEB$VAS2Lik[[1]])))
+
+lv_IEB$ID <- c(1:length(LikVAS$IEB$Lik[[1]]),
+             (length(LikVAS$IEB$Lik[[1]])+1):(length(LikVAS$IEB$Lik[[1]])+length(LikVAS$IEB$VAS[[1]])),
+                 (length(LikVAS$IEB$Lik[[1]])+1):(length(LikVAS$IEB$Lik[[1]])+length(LikVAS$IEB$VAS[[1]])))
+
+str(lv_IEB)
+
+names(lv_IEB) <- c(names(LikVAS$Means$Lik), "format", "ID")
+
+lv_IEB_long <- lv_IEB %>%
+  pivot_longer(-c(ID, format),
+               names_to = "Item",
+               values_to = "IEB") %>%
+  mutate(valence = fct_recode(Item,
+                              "positive" = "Energetic",
+                              "positive" = "Happy",
+                              "positive" = "Look Forward",
+                              "positive" = "Satiefied (S)",
+                              "positive" = "Satisfied (B)",
+                              "negative" = "Anxious",
+                              "negative" = "Ashamed",
+                              "negative" = "Discomfort",
+                              "negative" = "Disgusted",
+                              "negative" = "Guilty",
+                              "negative" = "Irritated",
+                              "negative" = "Lonely",
+                              "negative" = "Sad",
+                              "negative" = "Stressed")) %>%
+  mutate(valence = fct_relevel(valence, "negative", "positive")) %>%
+  mutate(Item = fct_relevel(Item,
+                             c("Happy",
+                               "Energetic",
+                               "Look Forward",
+                               "Satiefied (S)",
+                               "Satisfied (B)",
+                               "Sad",
+                               "Guilty",
+                               "Ashamed",
+                               "Disgusted",
+                               "Anxious",
+                               "Irritated",
+                               "Discomfort",
+                               "Lonely",
+                               "Stressed"))) %>%
+  mutate(valence = recode(valence,
+                          "negative" = "-1",
+                          "positive" = "1"),
+         valence = as.numeric(as.character(valence)))
+#Valence coded as: -1 negative, 1 positive
+
+sum(lv_IEB_long$IEB == "-1", na.rm = TRUE) #0
+sum(lv_IEB_long$IEB == "1", na.rm = TRUE) #0
+
+#Gaussian...
+
+ggplot(lv_IEB_long, aes(x = IEB)) +
+  geom_histogram()
+
+```
+
+### IEB: Model fitting
+
+```{r IEB.modelfitting}
+
+## multilevel regression
+
+mod_IEB <- bf(IEB ~ format*valence + (1 + valence|ID) + (1 + format|Item),
+               sigma ~ format*valence)
+
+## without Likert to VAS-data
+
+priors_IEB_noLiktoVAS <- c(set_prior("normal(0, 0.1)", class = "b", coef = "formatVAS"),
+                            set_prior("normal(0, 0.1)", class = "b", coef = "valence"),
+                            set_prior("normal(0, 0.1)", class = "b", coef = "formatVAS:valence"),
+                              ##sigma weights
+  set_prior("normal(0, 1)", class = "b", coef = "formatVAS", dpar = "sigma"),
+  set_prior("normal(0, 1)", class = "b", coef = "valence", dpar = "sigma"),
+  set_prior("normal(0, 1)", class = "b", coef = "formatVAS:valence", dpar = "sigma"),
+  ##rest
+  set_prior("student_t(5, 0, 1)", class = "Intercept"),
+  set_prior("lkj(3)", class = "cor", group = "ID"),
+  set_prior("lkj(3)", class = "cor", group = "Item"),
+  set_prior("student_t(3, 0, 0.1)", class = "sd", coef = "Intercept", group = "ID"),
+  set_prior("student_t(3, 0, 0.1)", class = "sd", coef = "valence", group = "ID"),
+  set_prior("student_t(3, 0, 0.1)", class = "sd", coef = "Intercept", group = "Item"),
+  set_prior("student_t(3, 0, 0.1)", class = "sd", coef = "formatVAS", group = "Item"))
+
+lv_IEB_long_noLiktoVAS <- lv_IEB_long %>% filter(format != "Likert to VAS")
+
+mod_IEB_noLiktoVAS_fit <- brm(mod_IEB, data = lv_IEB_long_noLiktoVAS, family = gaussian(), chains = 3, cores = 3, control=list(adapt_delta=0.99, max_treedepth = 30), warmup = 1000, iter = 2000,
+                         prior = priors_IEB_noLiktoVAS)
+
+save(mod_IEB_noLiktoVAS_fit, file = "mod_IEB_noLiktoVAS_fit.Rdata")
+
+```
+
+## Modality
+
+### Modality: Data preps
+
+```{r Modality.datapreps}
+
+# [1] "Means"    "SDs"     
+# [3] "RMSSD"    "AR"      
+# [5] "CorLag0"  "Modality"
+# [7] "Skew"     "IEB"
+
+lv_Modality <- rbind(LikVAS$Modality$Lik,
+              LikVAS$Modality$VAS,
+              LikVAS$Modality$VAS2Lik)
+
+lv_Modality$format <- c(rep("Likert", length(LikVAS$Modality$Lik[[1]])),
+                 rep("VAS", length(LikVAS$Modality$VAS[[1]])),
+                 rep("Likert to VAS", length(LikVAS$Modality$VAS2Lik[[1]])))
+
+lv_Modality$ID <- c(1:length(LikVAS$Modality$Lik[[1]]),
+             (length(LikVAS$Modality$Lik[[1]])+1):(length(LikVAS$Modality$Lik[[1]])+length(LikVAS$Modality$VAS[[1]])),
+                 (length(LikVAS$Modality$Lik[[1]])+1):(length(LikVAS$Modality$Lik[[1]])+length(LikVAS$Modality$VAS[[1]])))
+
+str(lv_Modality)
+
+lv_Modality_long <- lv_Modality %>%
+  pivot_longer(-c(ID, format),
+               names_to = "Item",
+               values_to = "Modality") %>%
+  mutate(valence = fct_recode(Item,
+                              "positive" = "Energetic",
+                              "positive" = "Happy",
+                              "positive" = "Look Forward",
+                              "positive" = "Satiefied (S)",
+                              "positive" = "Satisfied (B)",
+                              "negative" = "Anxious",
+                              "negative" = "Ashamed",
+                              "negative" = "Discomfort",
+                              "negative" = "Disgusted",
+                              "negative" = "Guilty",
+                              "negative" = "Irritated",
+                              "negative" = "Lonely",
+                              "negative" = "Sad",
+                              "negative" = "Stressed")) %>%
+  mutate(valence = fct_relevel(valence, "negative", "positive")) %>%
+  mutate(Item = fct_relevel(Item,
+                             c("Happy",
+                               "Energetic",
+                               "Look Forward",
+                               "Satiefied (S)",
+                               "Satisfied (B)",
+                               "Sad",
+                               "Guilty",
+                               "Ashamed",
+                               "Disgusted",
+                               "Anxious",
+                               "Irritated",
+                               "Discomfort",
+                               "Lonely",
+                               "Stressed"))) %>%
+  mutate(valence = recode(valence,
+                          "negative" = "-1",
+                          "positive" = "1"),
+         valence = as.numeric(as.character(valence)))
+#Valence coded as: -1 negative, 1 positive
+
+sum(lv_Modality_long$Modality == "0", na.rm = TRUE) #0
+sum(lv_Modality_long$Modality == "1", na.rm = TRUE) #7
+
+#one-inflated (?) Gaussian...
+
+ggplot(lv_Modality_long, aes(x = AR)) +
+  geom_histogram(stat = "count")
+
+```
+
+### Modality: Model fitting
+
+```{r Modality.modelfitting}
+
+## multilevel binomial regression
+
+mod_Modality <- bf(Modality ~ format*valence + (1 + valence|ID) + (1 + format|Item))
+
+## without Likert to VAS-data
+
+priors_Modality_noLiktoVAS <- c(set_prior("normal(0, 1)", class = "b", coef = "formatVAS"),
+                            set_prior("normal(0, 1)", class = "b", coef = "valence"),
+                            set_prior("normal(0, 1)", class = "b", coef = "formatVAS:valence"),
+                              ##sigma weights
+  set_prior("normal(0, 1)", class = "b", coef = "formatVAS", dpar = "sigma"),
+  set_prior("normal(0, 1)", class = "b", coef = "valence", dpar = "sigma"),
+  set_prior("normal(0, 1)", class = "b", coef = "formatVAS:valence", dpar = "sigma"),
+  ##rest
+  set_prior("student_t(5, 0, 2)", class = "Intercept"),
+  set_prior("lkj(3)", class = "cor", group = "ID"),
+  set_prior("lkj(3)", class = "cor", group = "Item"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "Intercept", group = "ID"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "valence", group = "ID"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "Intercept", group = "Item"),
+  set_prior("student_t(3, 0, 1)", class = "sd", coef = "formatVAS", group = "Item"))
+
+lv_Modality_long_noLiktoVAS <- lv_Modality_long %>% filter(format != "Likert to VAS")
+
+lv_Modality_long_noLiktoVAS %<>%
+  mutate(Modality = as.numeric(Modality))
+
+mod_Modality_noLiktoVAS_fit <- brm(mod_Modality, data = lv_Modality_long_noLiktoVAS, family = bernoulli(), chains = 3, cores = 3, control=list(adapt_delta=0.80), warmup = 1000, iter = 2000)
+
+save(mod_Modality_noLiktoVAS_fit, file = "mod_Modality_noLiktoVAS_fit.Rdata")
+
+```
+
+## Correlations with BSI
+
+```{r correlations.BSI}
+
+data_BSI <- readRDS("LikertvsVAS-main/Files/data_BSI_with_ESM.RDS")
+
+str(data_BSI)
+#out_BSI_Lik$BSI
+names(data_BSI[[1]])[15] <- "BSI"
+names(data_BSI[[2]])[15] <- "BSI"
+
+data_BSI_df <- rbind(data_BSI$Likert,
+              data_BSI$VAS)
+
+data_BSI_df$format <- c(rep("Likert", dim(data_BSI[[1]])[1]),
+                 rep("VAS", dim(data_BSI[[2]])[1]))
+
+data_BSI_df$ID <- c(1:119)
+
+str(data_BSI_df)
+
+data_BSI_df_long <- data_BSI_df %>%
+  pivot_longer(-c(ID, format, BSI),
+               names_to = "Item",
+               values_to = "Mean") %>%
+  mutate(valence = fct_recode(Item,
+                              "positive" = "Energetic",
+                              "positive" = "Happy",
+                              "positive" = "Look Forward",
+                              "positive" = "Satisfied (S)",
+                              "positive" = "Satisfied (B)",
+                              "negative" = "Anxious",
+                              "negative" = "Ashamed",
+                              "negative" = "Discomfort",
+                              "negative" = "Disgusted",
+                              "negative" = "Guilty",
+                              "negative" = "Irritated",
+                              "negative" = "Lonely",
+                              "negative" = "Sad",
+                              "negative" = "Stressed")) %>%
+  mutate(valence = fct_relevel(valence, "negative", "positive")) %>%
+  mutate(Item = fct_relevel(Item,
+                             c("Happy",
+                               "Energetic",
+                               "Look Forward",
+                               "Satisfied (S)",
+                               "Satisfied (B)",
+                               "Sad",
+                               "Guilty",
+                               "Ashamed",
+                               "Disgusted",
+                               "Anxious",
+                               "Irritated",
+                               "Discomfort",
+                               "Lonely",
+                               "Stressed"))) %>%
+  mutate(valence = recode(valence,
+                          "negative" = "-1",
+                          "positive" = "1"),
+         valence = as.numeric(as.character(valence)))
+
+#View(data_BSI_df_long)
+
+cor(data_BSI_df_long %>% select(BSI, Mean), use = "pairwise.complete.obs")
+
+data_BSI_df_long %>%
+  group_by(Item, format) %>%
+  summarize(Corr = cor(BSI, Mean, use = "pairwise.complete.obs"))
+
+data_BSI_df_long %<>%
+  mutate(BSI_z = scale(BSI)[,1],
+         Mean_z_grand = scale(Mean)[,1],
+         format_valence = interaction(format, valence)) %>%
+  group_by(Item) %>%
+  mutate(Mean_z_group = scale(Mean)[,1]) %>%
+  ungroup()
+
+data_BSI_df_stdgroup <- data_BSI_df %>%
+  group_by(format) %>%
+  filter(BSI != "NA") %>%
+  mutate(BSIz = scale(BSI)[,1],
+         Sadz = scale(Sad)[,1],
+         Guiltyz = scale(Guilty)[,1],
+         Ashamedz = scale(Ashamed)[,1],
+         Disgustedz = scale(Disgusted)[,1],
+         Anxiousz = scale(Anxious)[,1],
+         Irritatedz = scale(Irritated)[,1],
+         Discomfortz = scale(Discomfort)[,1],
+         Lonelyz = scale(Lonely)[,1],
+         Stressedz = scale(Stressed)[,1],
+         Happyz = scale(Happy)[,1],
+         Energeticz = scale(Energetic)[,1],
+         SatisfiedSz = scale(`Satisfied (S)`)[,1],
+         SatisfiedBz = scale(`Satisfied (B)`)[,1],
+         LookForwardz = scale(`Look Forward`)[,1])
+
+Model_BSI_group_fixed_fit <- brm(bf(Sadz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Guiltyz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Ashamedz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Disgustedz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Anxiousz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Irritatedz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Discomfortz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Lonelyz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Stressedz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Happyz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Energeticz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(SatisfiedSz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(SatisfiedBz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(LookForwardz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                   set_rescor(FALSE),
+                                  family = gaussian(),
+                                  data = data_BSI_df_stdgroup,
+                                  chains = 3, cores = 3, warmup = 1000, iter = 2000,
+                                  control=list(adapt_delta=0.95))
+
+save(Model_BSI_group_fixed_fit, file = "Model_BSI_group_fixed_fit.Rdata")
+
+
+```
+
+### Correlations with BSI: VAS2Lik mapping
+
+```{r VAS2Lik.correlations.BSI}
+
+data_BSI_VAS2Lik <- readRDS("LikertvsVAS-main/Files/data_BSI_with_ESM.RDS")
+
+str(data_BSI_VAS2Lik)
+#out_BSI_VAS2Lik_Lik$BSI
+names(data_BSI_VAS2Lik[[1]])[15] <- "BSI"
+names(data_BSI_VAS2Lik[[2]])[15] <- "BSI"
+names(data_BSI_VAS2Lik[[3]])[15] <- "BSI"
+
+data_BSI_VAS2Lik_df <- rbind(data_BSI_VAS2Lik$Likert,
+              data_BSI_VAS2Lik$VAS,
+              data_BSI_VAS2Lik$VAS2Likert
+              )
+
+data_BSI_VAS2Lik_df$format <- c(rep("Likert", dim(data_BSI_VAS2Lik[[1]])[1]),
+                 rep("VAS", dim(data_BSI_VAS2Lik[[2]])[1]),
+                 rep("VAS2Likert", dim(data_BSI_VAS2Lik[[3]])[1]))
+
+data_BSI_VAS2Lik_df$ID <- c(1:175)
+
+str(data_BSI_VAS2Lik_df)
+
+data_BSI_VAS2Lik_df_long <- data_BSI_VAS2Lik_df %>%
+  pivot_longer(-c(ID, format, BSI),
+               names_to = "Item",
+               values_to = "Mean") %>%
+  mutate(valence = fct_recode(Item,
+                              "positive" = "Energetic",
+                              "positive" = "Happy",
+                              "positive" = "Look Forward",
+                              "positive" = "Satisfied (S)",
+                              "positive" = "Satisfied (B)",
+                              "negative" = "Anxious",
+                              "negative" = "Ashamed",
+                              "negative" = "Discomfort",
+                              "negative" = "Disgusted",
+                              "negative" = "Guilty",
+                              "negative" = "Irritated",
+                              "negative" = "Lonely",
+                              "negative" = "Sad",
+                              "negative" = "Stressed")) %>%
+  mutate(valence = fct_relevel(valence, "negative", "positive")) %>%
+  mutate(Item = fct_relevel(Item,
+                             c("Happy",
+                               "Energetic",
+                               "Look Forward",
+                               "Satisfied (S)",
+                               "Satisfied (B)",
+                               "Sad",
+                               "Guilty",
+                               "Ashamed",
+                               "Disgusted",
+                               "Anxious",
+                               "Irritated",
+                               "Discomfort",
+                               "Lonely",
+                               "Stressed"))) %>%
+  mutate(valence = recode(valence,
+                          "negative" = "-1",
+                          "positive" = "1"),
+         valence = as.numeric(as.character(valence)))
+
+#View(data_BSI_VAS2Lik_df_long)
+
+cor(data_BSI_VAS2Lik_df_long %>% select(BSI, Mean), use = "pairwise.complete.obs")
+
+data_BSI_VAS2Lik_df_long %>%
+  group_by(Item, format) %>%
+  summarize(Corr = cor(BSI, Mean, use = "pairwise.complete.obs"))
+
+data_BSI_VAS2Lik_df_long %<>%
+  mutate(BSI_z = scale(BSI)[,1],
+         Mean_z_grand = scale(Mean)[,1],
+         format_valence = interaction(format, valence)) %>%
+  group_by(Item) %>%
+  mutate(Mean_z_group = scale(Mean)[,1]) %>%
+  ungroup()
+
+data_BSI_VAS2Lik_df_stdgroup <- data_BSI_VAS2Lik_df %>%
+  group_by(format) %>%
+  filter(BSI != "NA") %>%
+  mutate(BSIz = scale(BSI)[,1],
+         Sadz = scale(Sad)[,1],
+         Guiltyz = scale(Guilty)[,1],
+         Ashamedz = scale(Ashamed)[,1],
+         Disgustedz = scale(Disgusted)[,1],
+         Anxiousz = scale(Anxious)[,1],
+         Irritatedz = scale(Irritated)[,1],
+         Discomfortz = scale(Discomfort)[,1],
+         Lonelyz = scale(Lonely)[,1],
+         Stressedz = scale(Stressed)[,1],
+         Happyz = scale(Happy)[,1],
+         Energeticz = scale(Energetic)[,1],
+         SatisfiedSz = scale(`Satisfied (S)`)[,1],
+         SatisfiedBz = scale(`Satisfied (B)`)[,1],
+         LookForwardz = scale(`Look Forward`)[,1])
+
+Model_BSI_VAS2Lik_group_fixed_fit <- brm(bf(Sadz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Guiltyz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Ashamedz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Disgustedz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Anxiousz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Irritatedz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Discomfortz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Lonelyz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Stressedz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Happyz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Energeticz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(SatisfiedSz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(SatisfiedBz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(LookForwardz ~ 0 + BSIz:format,
+                                      sigma ~ 0 + format) +
+                                   set_rescor(FALSE),
+                                  family = gaussian(),
+                                  data = data_BSI_VAS2Lik_df_stdgroup,
+                                  chains = 3, cores = 3, warmup = 1000, iter = 2000,
+                                  control=list(adapt_delta=0.95))
+
+save(Model_BSI_VAS2Lik_group_fixed_fit, file = "Model_BSI_VAS2Lik_group_fixed_fit.Rdata")
+
+
+```
+
+## Correlations with DASS
+
+```{r correlations.DASS}
+
+data_DASS <- readRDS("LikertvsVAS-main/files/data_DASS_with_ESM.RDS")
+
+str(data_DASS)
+#out_DASS_Lik$DASS
+names(data_DASS[[1]])[15] <- "DASS_S"
+names(data_DASS[[2]])[15] <- "DASS_S"
+ names(data_DASS[[4]])[15] <- "DASS_A"
+ names(data_DASS[[5]])[15] <- "DASS_A"
+ names(data_DASS[[7]])[15] <- "DASS_D"
+ names(data_DASS[[8]])[15] <- "DASS_D"
+
+##DASS Stress
+ 
+ data_DASS_S_df <- rbind(data_DASS$cor_Lik_S,
+               data_DASS$cor_VAS_S)
+
+
+ data_DASS_S_df$format <- c(rep("Likert", dim(data_DASS[[1]])[1]),
+                  rep("VAS", dim(data_DASS[[2]])[1]))
+
+data_DASS_S_df$ID <- c(1:119)
+
+str(data_DASS_S_df)
+
+data_DASS_S_df_long <- data_DASS_S_df %>%
+  pivot_longer(-c(ID, format, DASS_S),
+               names_to = "Item",
+               values_to = "Mean") %>%
+  mutate(valence = fct_recode(Item,
+                              "positive" = "Energetic",
+                              "positive" = "Happy",
+                              "positive" = "Look Forward",
+                              "positive" = "Satisfied (S)",
+                              "positive" = "Satisfied (B)",
+                              "negative" = "Anxious",
+                              "negative" = "Ashamed",
+                              "negative" = "Discomfort",
+                              "negative" = "Disgusted",
+                              "negative" = "Guilty",
+                              "negative" = "Irritated",
+                              "negative" = "Lonely",
+                              "negative" = "Sad",
+                              "negative" = "Stressed")) %>%
+  mutate(valence = fct_relevel(valence, "negative", "positive")) %>%
+  mutate(Item = fct_relevel(Item,
+                             c("Happy",
+                               "Energetic",
+                               "Look Forward",
+                               "Satisfied (S)",
+                               "Satisfied (B)",
+                               "Sad",
+                               "Guilty",
+                               "Ashamed",
+                               "Disgusted",
+                               "Anxious",
+                               "Irritated",
+                               "Discomfort",
+                               "Lonely",
+                               "Stressed"))) %>%
+  mutate(valence = recode(valence,
+                          "negative" = "-1",
+                          "positive" = "1"),
+         valence = as.numeric(as.character(valence)))
+
+#View(data_DASS_S_df_long)
+
+cor(data_DASS_S_df_long %>% select(DASS_S, Mean), use = "pairwise.complete.obs")
+
+data_DASS_S_df_long %>%
+  group_by(Item, format) %>%
+  summarize(Corr = cor(DASS_S, Mean, use = "pairwise.complete.obs"))
+
+data_DASS_S_df_long %<>%
+  mutate(DASS_S_z = scale(DASS_S)[,1],
+         Mean_z_grand = scale(Mean)[,1],
+         format_valence = interaction(format, valence)) %>%
+  group_by(Item) %>%
+  mutate(Mean_z_group = scale(Mean)[,1]) %>%
+  ungroup()
+
+data_DASS_S_df_stdgroup <- data_DASS_S_df %>%
+  group_by(format) %>%
+  filter(DASS_S != "NA") %>%
+  mutate(DASS_Sz = scale(DASS_S)[,1],
+         Sadz = scale(Sad)[,1],
+         Guiltyz = scale(Guilty)[,1],
+         Ashamedz = scale(Ashamed)[,1],
+         Disgustedz = scale(Disgusted)[,1],
+         Anxiousz = scale(Anxious)[,1],
+         Irritatedz = scale(Irritated)[,1],
+         Discomfortz = scale(Discomfort)[,1],
+         Lonelyz = scale(Lonely)[,1],
+         Stressedz = scale(Stressed)[,1],
+         Happyz = scale(Happy)[,1],
+         Energeticz = scale(Energetic)[,1],
+         SatisfiedSz = scale(`Satisfied (S)`)[,1],
+         SatisfiedBz = scale(`Satisfied (B)`)[,1],
+         LookForwardz = scale(`Look Forward`)[,1])
+
+Model_DASS_S_group_fixed_fit <- brm(bf(Sadz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Guiltyz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Ashamedz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Disgustedz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Anxiousz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Irritatedz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Discomfortz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Lonelyz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Stressedz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Happyz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Energeticz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(SatisfiedSz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(SatisfiedBz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(LookForwardz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                   set_rescor(FALSE),
+                                  family = gaussian(),
+                                  data = data_DASS_S_df_stdgroup,
+                                  chains = 3, cores = 3, warmup = 1000, iter = 2000,
+                                  control=list(adapt_delta=0.95))
+
+save(Model_DASS_S_group_fixed_fit, file = "Model_DASS_S_group_fixed_fit.Rdata")
+
+## DASS Anxiety
+
+data_DASS_A_df <- rbind(data_DASS$cor_Lik_A,
+               data_DASS$cor_VAS_A)
+
+ data_DASS_A_df$format <- c(rep("Likert", dim(data_DASS[[1]])[1]),
+                  rep("VAS", dim(data_DASS[[2]])[1]))
+
+data_DASS_A_df$ID <- c(1:119)
+
+str(data_DASS_A_df)
+
+data_DASS_A_df_long <- data_DASS_A_df %>%
+  pivot_longer(-c(ID, format, DASS_A),
+               names_to = "Item",
+               values_to = "Mean") %>%
+  mutate(valence = fct_recode(Item,
+                              "positive" = "Energetic",
+                              "positive" = "Happy",
+                              "positive" = "Look Forward",
+                              "positive" = "Satisfied (S)",
+                              "positive" = "Satisfied (B)",
+                              "negative" = "Anxious",
+                              "negative" = "Ashamed",
+                              "negative" = "Discomfort",
+                              "negative" = "Disgusted",
+                              "negative" = "Guilty",
+                              "negative" = "Irritated",
+                              "negative" = "Lonely",
+                              "negative" = "Sad",
+                              "negative" = "Stressed")) %>%
+  mutate(valence = fct_relevel(valence, "negative", "positive")) %>%
+  mutate(Item = fct_relevel(Item,
+                             c("Happy",
+                               "Energetic",
+                               "Look Forward",
+                               "Satisfied (S)",
+                               "Satisfied (B)",
+                               "Sad",
+                               "Guilty",
+                               "Ashamed",
+                               "Disgusted",
+                               "Anxious",
+                               "Irritated",
+                               "Discomfort",
+                               "Lonely",
+                               "Stressed"))) %>%
+  mutate(valence = recode(valence,
+                          "negative" = "-1",
+                          "positive" = "1"),
+         valence = as.numeric(as.character(valence)))
+
+#View(data_DASS_A_df_long)
+
+cor(data_DASS_A_df_long %>% select(DASS_A, Mean), use = "pairwise.complete.obs")
+
+data_DASS_A_df_long %>%
+  group_by(Item, format) %>%
+  summarize(Corr = cor(DASS_A, Mean, use = "pairwise.complete.obs"))
+
+data_DASS_A_df_long %<>%
+  mutate(DASS_A_z = scale(DASS_A)[,1],
+         Mean_z_grand = scale(Mean)[,1],
+         format_valence = interaction(format, valence)) %>%
+  group_by(Item) %>%
+  mutate(Mean_z_group = scale(Mean)[,1]) %>%
+  ungroup()
+
+data_DASS_A_df_stdgroup <- data_DASS_A_df %>%
+  group_by(format) %>%
+  filter(DASS_A != "NA") %>%
+  mutate(DASS_Az = scale(DASS_A)[,1],
+         Sadz = scale(Sad)[,1],
+         Guiltyz = scale(Guilty)[,1],
+         Ashamedz = scale(Ashamed)[,1],
+         Disgustedz = scale(Disgusted)[,1],
+         Anxiousz = scale(Anxious)[,1],
+         Irritatedz = scale(Irritated)[,1],
+         Discomfortz = scale(Discomfort)[,1],
+         Lonelyz = scale(Lonely)[,1],
+         Stressedz = scale(Stressed)[,1],
+         Happyz = scale(Happy)[,1],
+         Energeticz = scale(Energetic)[,1],
+         SatisfiedSz = scale(`Satisfied (S)`)[,1],
+         SatisfiedBz = scale(`Satisfied (B)`)[,1],
+         LookForwardz = scale(`Look Forward`)[,1])
+
+Model_DASS_A_group_fixed_fit <- brm(bf(Sadz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Guiltyz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Ashamedz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Disgustedz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Anxiousz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Irritatedz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Discomfortz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Lonelyz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Stressedz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Happyz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Energeticz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                   bf(SatisfiedSz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                   bf(SatisfiedBz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                   bf(LookForwardz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                   set_rescor(FALSE),
+                                  family = gaussian(),
+                                  data = data_DASS_A_df_stdgroup,
+                                  chains = 3, cores = 3, warmup = 1000, iter = 2000,
+                                  control=list(adapt_delta=0.95))
+
+save(Model_DASS_A_group_fixed_fit, file = "Model_DASS_A_group_fixed_fit.Rdata")
+
+## DASS Depression
+
+data_DASS_D_df <- rbind(data_DASS$cor_Lik_D,
+               data_DASS$cor_VAS_D)
+
+ data_DASS_D_df$format <- c(rep("Likert", dim(data_DASS[[1]])[1]),
+                  rep("VAS", dim(data_DASS[[2]])[1]))
+
+data_DASS_D_df$ID <- c(1:119)
+
+str(data_DASS_D_df)
+
+data_DASS_D_df_long <- data_DASS_D_df %>%
+  pivot_longer(-c(ID, format, DASS_D),
+               names_to = "Item",
+               values_to = "Mean") %>%
+  mutate(valence = fct_recode(Item,
+                              "positive" = "Energetic",
+                              "positive" = "Happy",
+                              "positive" = "Look Forward",
+                              "positive" = "Satisfied (S)",
+                              "positive" = "Satisfied (B)",
+                              "negative" = "Anxious",
+                              "negative" = "Ashamed",
+                              "negative" = "Discomfort",
+                              "negative" = "Disgusted",
+                              "negative" = "Guilty",
+                              "negative" = "Irritated",
+                              "negative" = "Lonely",
+                              "negative" = "Sad",
+                              "negative" = "Stressed")) %>%
+  mutate(valence = fct_relevel(valence, "negative", "positive")) %>%
+  mutate(Item = fct_relevel(Item,
+                             c("Happy",
+                               "Energetic",
+                               "Look Forward",
+                               "Satisfied (S)",
+                               "Satisfied (B)",
+                               "Sad",
+                               "Guilty",
+                               "Ashamed",
+                               "Disgusted",
+                               "Anxious",
+                               "Irritated",
+                               "Discomfort",
+                               "Lonely",
+                               "Stressed"))) %>%
+  mutate(valence = recode(valence,
+                          "negative" = "-1",
+                          "positive" = "1"),
+         valence = as.numeric(as.character(valence)))
+
+#View(data_DASS_D_df_long)
+
+cor(data_DASS_D_df_long %>% select(DASS_D, Mean), use = "pairwise.complete.obs")
+
+data_DASS_D_df_long %>%
+  group_by(Item, format) %>%
+  summarize(Corr = cor(DASS_D, Mean, use = "pairwise.complete.obs"))
+
+data_DASS_D_df_long %<>%
+  mutate(DASS_D_z = scale(DASS_D)[,1],
+         Mean_z_grand = scale(Mean)[,1],
+         format_valence = interaction(format, valence)) %>%
+  group_by(Item) %>%
+  mutate(Mean_z_group = scale(Mean)[,1]) %>%
+  ungroup()
+
+data_DASS_D_df_stdgroup <- data_DASS_D_df %>%
+  group_by(format) %>%
+  filter(DASS_D != "NA") %>%
+  mutate(DASS_Dz = scale(DASS_D)[,1],
+         Sadz = scale(Sad)[,1],
+         Guiltyz = scale(Guilty)[,1],
+         Ashamedz = scale(Ashamed)[,1],
+         Disgustedz = scale(Disgusted)[,1],
+         Anxiousz = scale(Anxious)[,1],
+         Irritatedz = scale(Irritated)[,1],
+         Discomfortz = scale(Discomfort)[,1],
+         Lonelyz = scale(Lonely)[,1],
+         Stressedz = scale(Stressed)[,1],
+         Happyz = scale(Happy)[,1],
+         Energeticz = scale(Energetic)[,1],
+         SatisfiedSz = scale(`Satisfied (S)`)[,1],
+         SatisfiedBz = scale(`Satisfied (B)`)[,1],
+         LookForwardz = scale(`Look Forward`)[,1])
+
+Model_DASS_D_group_fixed_fit <- brm(bf(Sadz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Guiltyz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Ashamedz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Disgustedz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Anxiousz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Irritatedz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Discomfortz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Lonelyz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Stressedz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Happyz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Energeticz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(SatisfiedSz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(SatisfiedBz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(LookForwardz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                   set_rescor(FALSE),
+                                  family = gaussian(),
+                                  data = data_DASS_D_df_stdgroup,
+                                  chains = 3, cores = 3, warmup = 1000, iter = 2000,
+                                  control=list(adapt_delta=0.95))
+
+save(Model_DASS_D_group_fixed_fit, file = "Model_DASS_D_group_fixed_fit.Rdata")
+
+```
+
+## VS2Lik: Correlations with DASS
+
+```{r correlations.DASS}
+
+data_DASS <- readRDS("LikertvsVAS-main/files/data_DASS_with_ESM.RDS")
+
+str(data_DASS)
+#out_DASS_Lik$DASS
+names(data_DASS[[1]])[15] <- "DASS_S"
+names(data_DASS[[2]])[15] <- "DASS_S"
+names(data_DASS[[3]])[15] <- "DASS_S"
+ names(data_DASS[[4]])[15] <- "DASS_A"
+ names(data_DASS[[5]])[15] <- "DASS_A"
+ names(data_DASS[[6]])[15] <- "DASS_A"
+ names(data_DASS[[7]])[15] <- "DASS_D"
+ names(data_DASS[[8]])[15] <- "DASS_D"
+names(data_DASS[[9]])[15] <- "DASS_D"
+
+##DASS Stress
+ 
+ data_DASS_S_VAS2Lik_df <- rbind(data_DASS$cor_Lik_S,
+               data_DASS$cor_VAS_S,
+               data_DASS$cor_VAS2Lik_S)
+
+
+ data_DASS_S_VAS2Lik_df$format <- c(rep("Likert", dim(data_DASS[[1]])[1]),
+                  rep("VAS", dim(data_DASS[[2]])[1]),
+                  rep("VAS2Lik", dim(data_DASS[[3]])[1]))
+
+data_DASS_S_VAS2Lik_df$ID <- c(1:175)
+
+str(data_DASS_S_VAS2Lik_df)
+
+data_DASS_S_VAS2Lik_df_long <- data_DASS_S_VAS2Lik_df %>%
+  pivot_longer(-c(ID, format, DASS_S),
+               names_to = "Item",
+               values_to = "Mean") %>%
+  mutate(valence = fct_recode(Item,
+                              "positive" = "Energetic",
+                              "positive" = "Happy",
+                              "positive" = "Look Forward",
+                              "positive" = "Satisfied (S)",
+                              "positive" = "Satisfied (B)",
+                              "negative" = "Anxious",
+                              "negative" = "Ashamed",
+                              "negative" = "Discomfort",
+                              "negative" = "Disgusted",
+                              "negative" = "Guilty",
+                              "negative" = "Irritated",
+                              "negative" = "Lonely",
+                              "negative" = "Sad",
+                              "negative" = "Stressed")) %>%
+  mutate(valence = fct_relevel(valence, "negative", "positive")) %>%
+  mutate(Item = fct_relevel(Item,
+                             c("Happy",
+                               "Energetic",
+                               "Look Forward",
+                               "Satisfied (S)",
+                               "Satisfied (B)",
+                               "Sad",
+                               "Guilty",
+                               "Ashamed",
+                               "Disgusted",
+                               "Anxious",
+                               "Irritated",
+                               "Discomfort",
+                               "Lonely",
+                               "Stressed"))) %>%
+  mutate(valence = recode(valence,
+                          "negative" = "-1",
+                          "positive" = "1"),
+         valence = as.numeric(as.character(valence)))
+
+#View(data_DASS_S_VAS2Lik_df_long)
+
+cor(data_DASS_S_VAS2Lik_df_long %>% select(DASS_S_VAS2Lik, Mean), use = "pairwise.complete.obs")
+
+data_DASS_S_VAS2Lik_df_long %>%
+  group_by(Item, format) %>%
+  summarize(Corr = cor(DASS_S, Mean, use = "pairwise.complete.obs"))
+
+data_DASS_S_VAS2Lik_df_long %<>%
+  mutate(DASS_S_z = scale(DASS_S)[,1],
+         Mean_z_grand = scale(Mean)[,1],
+         format_valence = interaction(format, valence)) %>%
+  group_by(Item) %>%
+  mutate(Mean_z_group = scale(Mean)[,1]) %>%
+  ungroup()
+
+data_DASS_S_VAS2Lik_df_stdgroup <- data_DASS_S_VAS2Lik_df %>%
+  group_by(format) %>%
+  filter(DASS_S != "NA") %>%
+  mutate(DASS_Sz = scale(DASS_S)[,1],
+         Sadz = scale(Sad)[,1],
+         Guiltyz = scale(Guilty)[,1],
+         Ashamedz = scale(Ashamed)[,1],
+         Disgustedz = scale(Disgusted)[,1],
+         Anxiousz = scale(Anxious)[,1],
+         Irritatedz = scale(Irritated)[,1],
+         Discomfortz = scale(Discomfort)[,1],
+         Lonelyz = scale(Lonely)[,1],
+         Stressedz = scale(Stressed)[,1],
+         Happyz = scale(Happy)[,1],
+         Energeticz = scale(Energetic)[,1],
+         SatisfiedSz = scale(`Satisfied (S)`)[,1],
+         SatisfiedBz = scale(`Satisfied (B)`)[,1],
+         LookForwardz = scale(`Look Forward`)[,1])
+
+Model_DASS_S_VAS2Lik_group_fixed_fit <- brm(bf(Sadz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Guiltyz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Ashamedz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Disgustedz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Anxiousz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Irritatedz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Discomfortz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Lonelyz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Stressedz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Happyz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Energeticz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(SatisfiedSz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(SatisfiedBz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(LookForwardz ~ 0 + DASS_Sz:format,
+                                      sigma ~ 0 + format) +
+                                   set_rescor(FALSE),
+                                  family = gaussian(),
+                                  data = data_DASS_S_VAS2Lik_df_stdgroup,
+                                  chains = 3, cores = 3, warmup = 1000, iter = 2000,
+                                  control=list(adapt_delta=0.95))
+
+save(Model_DASS_S_VAS2Lik_group_fixed_fit, file = "Model_DASS_S_VAS2Lik_group_fixed_fit.Rdata")
+
+## DASS Anxiety
+
+data_DASS_A_VAS2Lik_df <- rbind(data_DASS$cor_Lik_A,
+               data_DASS$cor_VAS_A,
+               data_DASS$cor_VAS2Lik_A)
+
+ data_DASS_A_VAS2Lik_df$format <- c(rep("Likert", dim(data_DASS[[1]])[1]),
+                  rep("VAS", dim(data_DASS[[2]])[1]),
+                  rep("VAS2Lik", dim(data_DASS[[3]])[1]))
+
+data_DASS_A_VAS2Lik_df$ID <- c(1:175)
+
+str(data_DASS_A_VAS2Lik_df)
+
+data_DASS_A_VAS2Lik_df_long <- data_DASS_A_VAS2Lik_df %>%
+  pivot_longer(-c(ID, format, DASS_A),
+               names_to = "Item",
+               values_to = "Mean") %>%
+  mutate(valence = fct_recode(Item,
+                              "positive" = "Energetic",
+                              "positive" = "Happy",
+                              "positive" = "Look Forward",
+                              "positive" = "Satisfied (S)",
+                              "positive" = "Satisfied (B)",
+                              "negative" = "Anxious",
+                              "negative" = "Ashamed",
+                              "negative" = "Discomfort",
+                              "negative" = "Disgusted",
+                              "negative" = "Guilty",
+                              "negative" = "Irritated",
+                              "negative" = "Lonely",
+                              "negative" = "Sad",
+                              "negative" = "Stressed")) %>%
+  mutate(valence = fct_relevel(valence, "negative", "positive")) %>%
+  mutate(Item = fct_relevel(Item,
+                             c("Happy",
+                               "Energetic",
+                               "Look Forward",
+                               "Satisfied (S)",
+                               "Satisfied (B)",
+                               "Sad",
+                               "Guilty",
+                               "Ashamed",
+                               "Disgusted",
+                               "Anxious",
+                               "Irritated",
+                               "Discomfort",
+                               "Lonely",
+                               "Stressed"))) %>%
+  mutate(valence = recode(valence,
+                          "negative" = "-1",
+                          "positive" = "1"),
+         valence = as.numeric(as.character(valence)))
+
+#View(data_DASS_A_VAS2Lik_df_long)
+
+cor(data_DASS_A_VAS2Lik_df_long %>% select(DASS_A, Mean), use = "pairwise.complete.obs")
+
+data_DASS_A_VAS2Lik_df_long %>%
+  group_by(Item, format) %>%
+  summarize(Corr = cor(DASS_A, Mean, use = "pairwise.complete.obs"))
+
+data_DASS_A_VAS2Lik_df_long %<>%
+  mutate(DASS_A_Vz = scale(DASS_A)[,1],
+         Mean_z_grand = scale(Mean)[,1],
+         format_valence = interaction(format, valence)) %>%
+  group_by(Item) %>%
+  mutate(Mean_z_group = scale(Mean)[,1]) %>%
+  ungroup()
+
+data_DASS_A_VAS2Lik_df_stdgroup <- data_DASS_A_VAS2Lik_df %>%
+  group_by(format) %>%
+  filter(DASS_A != "NA") %>%
+  mutate(DASS_Az = scale(DASS_A)[,1],
+         Sadz = scale(Sad)[,1],
+         Guiltyz = scale(Guilty)[,1],
+         Ashamedz = scale(Ashamed)[,1],
+         Disgustedz = scale(Disgusted)[,1],
+         Anxiousz = scale(Anxious)[,1],
+         Irritatedz = scale(Irritated)[,1],
+         Discomfortz = scale(Discomfort)[,1],
+         Lonelyz = scale(Lonely)[,1],
+         Stressedz = scale(Stressed)[,1],
+         Happyz = scale(Happy)[,1],
+         Energeticz = scale(Energetic)[,1],
+         SatisfiedSz = scale(`Satisfied (S)`)[,1],
+         SatisfiedBz = scale(`Satisfied (B)`)[,1],
+         LookForwardz = scale(`Look Forward`)[,1])
+
+Model_DASS_A_VAS2Lik_group_fixed_fit <- brm(bf(Sadz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Guiltyz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Ashamedz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Disgustedz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Anxiousz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Irritatedz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Discomfortz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Lonelyz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Stressedz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Happyz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Energeticz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                   bf(SatisfiedSz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                   bf(SatisfiedBz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                   bf(LookForwardz ~ 0 + DASS_Az:format,
+                                      sigma ~ 0 + format) +
+                                   set_rescor(FALSE),
+                                  family = gaussian(),
+                                  data = data_DASS_A_VAS2Lik_df_stdgroup,
+                                  chains = 3, cores = 3, warmup = 1000, iter = 2000,
+                                  control=list(adapt_delta=0.95))
+
+save(Model_DASS_A_VAS2Lik_group_fixed_fit, file = "Model_DASS_A_VAS2Lik_group_fixed_fit.Rdata")
+
+## DASS Depression
+
+data_DASS_D_VAS2Lik_df <- rbind(data_DASS$cor_Lik_D,
+               data_DASS$cor_VAS_D,
+               data_DASS$cor_VAS2Lik_D)
+
+ data_DASS_D_VAS2Lik_df$format <- c(rep("Likert", dim(data_DASS[[1]])[1]),
+                  rep("VAS", dim(data_DASS[[2]])[1]),
+                  rep("VAS2Lik", dim(data_DASS[[3]])[1]))
+
+data_DASS_D_VAS2Lik_df$ID <- c(1:175)
+
+str(data_DASS_D_VAS2Lik_df)
+
+data_DASS_D_VAS2Lik_df_long <- data_DASS_D_VAS2Lik_df %>%
+  pivot_longer(-c(ID, format, DASS_D),
+               names_to = "Item",
+               values_to = "Mean") %>%
+  mutate(valence = fct_recode(Item,
+                              "positive" = "Energetic",
+                              "positive" = "Happy",
+                              "positive" = "Look Forward",
+                              "positive" = "Satisfied (S)",
+                              "positive" = "Satisfied (B)",
+                              "negative" = "Anxious",
+                              "negative" = "Ashamed",
+                              "negative" = "Discomfort",
+                              "negative" = "Disgusted",
+                              "negative" = "Guilty",
+                              "negative" = "Irritated",
+                              "negative" = "Lonely",
+                              "negative" = "Sad",
+                              "negative" = "Stressed")) %>%
+  mutate(valence = fct_relevel(valence, "negative", "positive")) %>%
+  mutate(Item = fct_relevel(Item,
+                             c("Happy",
+                               "Energetic",
+                               "Look Forward",
+                               "Satisfied (S)",
+                               "Satisfied (B)",
+                               "Sad",
+                               "Guilty",
+                               "Ashamed",
+                               "Disgusted",
+                               "Anxious",
+                               "Irritated",
+                               "Discomfort",
+                               "Lonely",
+                               "Stressed"))) %>%
+  mutate(valence = recode(valence,
+                          "negative" = "-1",
+                          "positive" = "1"),
+         valence = as.numeric(as.character(valence)))
+
+#View(data_DASS_D_VAS2Lik_df_long)
+
+cor(data_DASS_D_VAS2Lik_df_long %>% select(DASS_D, Mean), use = "pairwise.complete.obs")
+
+data_DASS_D_VAS2Lik_df_long %>%
+  group_by(Item, format) %>%
+  summarize(Corr = cor(DASS_D, Mean, use = "pairwise.complete.obs"))
+
+data_DASS_D_VAS2Lik_df_long %<>%
+  mutate(DASS_D_Vz = scale(DASS_D)[,1],
+         Mean_z_grand = scale(Mean)[,1],
+         format_valence = interaction(format, valence)) %>%
+  group_by(Item) %>%
+  mutate(Mean_z_group = scale(Mean)[,1]) %>%
+  ungroup()
+
+data_DASS_D_VAS2Lik_df_stdgroup <- data_DASS_D_VAS2Lik_df %>%
+  group_by(format) %>%
+  filter(DASS_D != "NA") %>%
+  mutate(DASS_Dz = scale(DASS_D)[,1],
+         Sadz = scale(Sad)[,1],
+         Guiltyz = scale(Guilty)[,1],
+         Ashamedz = scale(Ashamed)[,1],
+         Disgustedz = scale(Disgusted)[,1],
+         Anxiousz = scale(Anxious)[,1],
+         Irritatedz = scale(Irritated)[,1],
+         Discomfortz = scale(Discomfort)[,1],
+         Lonelyz = scale(Lonely)[,1],
+         Stressedz = scale(Stressed)[,1],
+         Happyz = scale(Happy)[,1],
+         Energeticz = scale(Energetic)[,1],
+         SatisfiedSz = scale(`Satisfied (S)`)[,1],
+         SatisfiedBz = scale(`Satisfied (B)`)[,1],
+         LookForwardz = scale(`Look Forward`)[,1])
+
+Model_DASS_D_VAS2Lik_group_fixed_fit <- brm(bf(Sadz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Guiltyz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Ashamedz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                     bf(Disgustedz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Anxiousz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Irritatedz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Discomfortz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Lonelyz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Stressedz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Happyz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(Energeticz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(SatisfiedSz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(SatisfiedBz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                   bf(LookForwardz ~ 0 + DASS_Dz:format,
+                                      sigma ~ 0 + format) +
+                                   set_rescor(FALSE),
+                                  family = gaussian(),
+                                  data = data_DASS_D_VAS2Lik_df_stdgroup,
+                                  chains = 3, cores = 3, warmup = 1000, iter = 2000,
+                                  control=list(adapt_delta=0.95))
+
+save(Model_DASS_D_VAS2Lik_group_fixed_fit, file = "Model_DASS_D_VAS2Lik_group_fixed_fit.Rdata")
+
+
+```
+
+## Correlation matrices comparison
+
+```{r correlations.comparison}
+
+data_corr <- readRDS("LikertvsVAS-main/Files/means_SMS_March27.RDS")
+data_corr_Lik <- readRDS("LikertvsVAS-main/Files/data_ESM_Lik_incl.RDS")
+data_corr_VAS <- readRDS("LikertvsVAS-main/Files/data_ESM_VAS_incl.RDS")
+
+# jonashaslbeck@gmail.com; April 3rd, 2024
+
+# ----------------------------------------------------
+# -------- What is happening here? -------------------
+# ----------------------------------------------------
+
+# Take inputs from various places and plot figures
+
+# ----------------------------------------------------
+# -------- Loading Packages --------------------------
+# ----------------------------------------------------
+
+# Plotting
+library(RColorBrewer)
+library(scales)
+library(HDInterval)
+source("0_aux_Functions.R")
+
+# ----------------------------------------------------
+# -------- Global Settings ---------------------------
+# ----------------------------------------------------
+
+vFig <- "April8"
+sel <- 4:17 # indicating cols of data
+p <- length(sel)
+
+
+# ----------------------------------------------------
+# -------- Loading Processed Files -------------------
+# ----------------------------------------------------
+
+# Main data [for sanity checks]
+data_Lik <- readRDS("LikertvsVAS-main/Files/data_ESM_Lik_incl.RDS")
+data_VAS <- readRDS("LikertvsVAS-main/Files/data_ESM_VAS_incl.RDS")
+
+# ----------------------------------------------------
+# -------- Preprocess: mean within-person cors [This has to go in an earlier file later] ----------
+# ----------------------------------------------------
+
+# Likert
+u_subj_Lik <- unique(data_Lik$Name)
+n_subj_Lik <- length(u_subj_Lik)
+a_cors_Lik <- array(NA, dim=c(14, 14, n_subj_Lik))
+for(i in 1:n_subj_Lik) a_cors_Lik[, , i] <- cor(data_Lik[data_Lik$Name==u_subj_Lik[i], 4:17], use="complete.obs")
+# Average network
+cors_av_Lik <- apply(a_cors_Lik, 1:2, function(x) mean(x, na.rm=TRUE))
+cors_sd_Lik <- apply(a_cors_Lik, 1:2, function(x) sd(x, na.rm=TRUE))
+
+# Likert
+u_subj_VAS <- unique(data_VAS$Name)
+n_subj_VAS <- length(u_subj_VAS)
+a_cors_VAS <- array(NA, dim=c(14, 14, n_subj_VAS))
+for(i in 1:n_subj_VAS) a_cors_VAS[, , i] <- cor(data_VAS[data_VAS$Name==u_subj_VAS[i], 4:17], use="complete.obs")
+# Average network
+cors_av_VAS <- apply(a_cors_VAS, 1:2, function(x) mean(x, na.rm=TRUE))
+cors_sd_VAS <- apply(a_cors_VAS, 1:2, function(x) sd(x, na.rm=TRUE))
+
+#cors_av_VAS[upper.tri(cors_av_VAS, diag = F)] <- NA
+#cors_av_Lik[upper.tri(cors_av_Lik, diag = F)] <- NA
+
+mat_out <- rbind(cors_av_VAS, cors_av_Lik)
+
+write.table(mat_out, "correlation_data.txt", row.names = FALSE, col.names = FALSE, quote = FALSE)
+
+# ----------------------------------------------------
+# -------- Closer Look at Correlations across scales -
+# ----------------------------------------------------
+
+eig_Lik <- eigen(cors_av_Lik)
+eig_VAS <- eigen(cors_av_VAS)
+dev.off()
+plot(eig_Lik$values, col=cols[1], type="l")
+lines(eig_VAS$values, col=cols[2])
+
+library(psych)
+?cortest.jennrich
+
+out_jr <- cortest.jennrich(R1=cors_av_Lik, R2=cors_av_VAS, n1=56*30, n2=51*30)
+out_jr
+
+# # Difference
+par(mfrow=c(1,1))
+cors_diggSc <- cors_av_VAS-cors_av_Lik
+PlotHeat(data=cors_diggSc,
+         names=names[4:17],
+         title="Differences: VAS - Likert")
+
+
+par(mfrow=c(1,1))
+plot(cors_av_VAS[upper.tri(cors_av_VAS)], cors_av_Lik[upper.tri(cors_av_Lik)],
+     xlim=c(-.6,.6), ylim=c(-.6,.6),
+     xlab="Cors VAS", ylab="Cors Likert")
+abline(0,1)
+
+# ---- Inspect SDs ----
+mean(cors_sd_Lik)
+mean(cors_sd_VAS)
+
+library(qgraph)
+
+par(mfrow=c(1,2))
+qgraph(cors_sd_Lik, labels=names[4:17], maximum=.4, title="SD Likert")
+qgraph(cors_sd_VAS, labels=names[4:17], maximum=.4, title="SD VAS")
+
+# Difference
+par(mfrow=c(1,1))
+cors_SD_diggSc <- cors_sd_VAS-cors_sd_Lik
+qgraph(cors_SD_diggSc, labels=names[4:17], maximum=.3,
+       title="Diff = VAS - Likert",
+       edge.labels=T) # There is something systematic
+
+
+
+
+```
+
+
+## Missing data
+
+### Missings: Data preps
+
+```{r missings.data.preps}
+
+
+NA_prop <- readRDS("NA_prop.RDS")
+
+NA_prop_Lik <- NA_prop[[1]][NA_prop[[1]]$Name %in% data_Lik$Name, ]
+NA_prop_VAS <- NA_prop[[2]][NA_prop[[2]]$Name %in% data_VAS$Name, ]
+
+str(NA_prop)
+dim(NA_prop_Lik)
+dim(NA_prop_VAS)
+
+NA_dat <- rbind(NA_prop[[1]],
+                NA_prop[[2]])
+
+NA_dat$format <- c(rep("Likert", dim(NA_prop[[1]])[1]),
+                   rep("VAS", dim(NA_prop[[2]])[1]))
+
+NA_dat %<>% mutate(prop = 1-prop_missing)
+
+table(NA_dat$prop_missing, NA_dat$format)
+
+```
+
+### Missings: Model fitting
+
+```{r missings.fit}
+
+#set priors
+priors_Missings_zoib <- c(set_prior("normal(0.0, 0.5)", class = "b", coef = "formatVAS"),
+                      ##zoi
+                      set_prior("normal(-2, 0.5)", class = "Intercept", dpar = "zoi"),
+                      set_prior("normal(0.0, 0.5)", class = "b", coef = "formatVAS", dpar = "zoi"),
+                      ##coi
+                      set_prior("normal(0, 0.5)", class = "Intercept", dpar = "coi"),
+                      set_prior("normal(0.0, 0.5)", class = "b", coef = "formatVAS", dpar = "coi"),
+                      ##rest
+                      set_prior("student_t(3, -2, 0.5)", class = "Intercept"))
+
+mod_Missings_zoib_noVAS2Lik_fit <- brm(bf(prop_missing ~ format,
+                       phi ~ format,
+                       zoi ~ format,
+                       coi ~ format),
+                    family = zero_one_inflated_beta(),
+                    data = NA_dat,
+                    chains = 3,
+                    cores = 3,
+                    control=list(adapt_delta=0.95,
+                                 max_treedepth = 30),
+                    warmup = 1000, iter = 2000,
+                    prior = priors_Missings_zoib)
+
+save(mod_Missings_zoib_noVAS2Lik_fit, file = "mod_Missings_zoib_noVAS2Lik_fit.Rdata")
+
+
+
+```
+
+## Dropout
+
+## Duration
+
+### Duration: Data preps
+
+```{r Duration.datapreps}
+
+
+str(durations)
+
+durations$Lik$format <- "Likert"
+durations$VAS$format <- "VAS"
+
+duration <- rbind(durations$Lik,
+              durations$VAS)
+
+duration %<>%
+  pivot_longer(c("Dur_Morning", "Dur_Day", "Dur_Evening"),
+               names_to = "period",
+               values_to = "duration"
+  )
+
+describeBy(duration$duration, duration$format)
+
+
+```
+
+### Duration: Model fitting
+
+```{r Durataion.fit}
+
+
+mod_duration <- bf(duration ~ format + (1 + format|period) + (1 + format|Name),
+                   sigma ~ format)
+
+mod_duration_fit <- brm(mod_duration,
+                        data = duration,
+                        cores = 3,
+                        chains = 3,
+                        warmup = 1000, iter = 4000,
+                        control=list(adapt_delta=0.99,
+                                 max_treedepth = 30))
+summary(mod_duration_fit)
+save(mod_duration_fit, file = "mod_duration_fit.Rdata")
+pp_check(mod_duration_fit)
+
+#lognormal
+
+mod_duration_log <- bf(duration ~ format + (1 + format|period) + (1 + format|Name),
+                   sigma ~ format)
+
+mod_duration_log_fit <- brm(mod_duration_log,
+                        data = duration,
+                        cores = 3,
+                        family = lognormal(),
+                        chains = 3,
+                        warmup = 1000, iter = 4000,
+                        control=list(adapt_delta=0.99,
+                                 max_treedepth = 30))
+summary(mod_duration_log_fit)
+save(mod_duration_log_fit, file = "mod_duration_log_fit.Rdata")
+pp_check(mod_duration_log_fit)
+
+#Exgaussian
+
+# get_prior(bf(duration ~ format + (1 + format|period) + (1|Name),
+#                    sigma ~ format,
+#                    beta ~ format),
+#           family = exgaussian(),
+#           data = duration)
+# #Really well-selected default priors; minimum empirical Bayes ;)
+# 
+# mod_duration_exg <- bf(duration ~ format + (1 + format|period) + (1|Name),
+#                    sigma ~ format,
+#                    beta ~ format)
+# mod_duration_exg_fit <- brm(mod_duration_exg,
+#                         data = duration,
+#                         cores = 3,
+#                         chains = 3,
+#                                                control=list(adapt_delta=0.99,
+#                                  max_treedepth = 30),
+#                         family = exgaussian(),
+#                         warmup = 1000, iter = 3000)
+# save(mod_duration_exg_fit, file = "mod_duration_exg_fit.Rdata")
+# 
+# summary(mod_duration_exg_fit)
+# pp_check(mod_duration_exg_fit)
+# 
+# mod_duration_exg_simple <- bf(duration ~ format + (1|period) + (1|Name))
+# mod_duration_exg_simple_fit <- brm(mod_duration_exg_simple,
+#                         data = duration,
+#                         cores = 3,
+#                         chains = 3,
+#                                                control=list(adapt_delta=0.99,
+#                                  max_treedepth = 15),
+#                         family = exgaussian(),
+#                         warmup = 1000, iter = 3000)
+# save(mod_duration_exg_simple_fit, file = "mod_duration_exg_simple_fit.Rdata")
+# 
+# summary(mod_duration_exg_simple_fit)
+# pp_check(mod_duration_exg_simple_fit)
+# 
+# mod_duration_exg_simple2 <- bf(duration ~ format + (1|period) + (1|Name),
+#                               sigma ~ format)
+# mod_duration_exg_simple2_fit <- brm(mod_duration_exg_simple2,
+#                         data = duration,
+#                         cores = 3,
+#                         chains = 3,
+#                                                control=list(adapt_delta=0.99,
+#                                  max_treedepth = 15),
+#                         family = exgaussian(),
+#                         warmup = 1000, iter = 3000)
+# save(mod_duration_exg_simple2_fit, file = "mod_duration_exg_simple2_fit.Rdata")
+# 
+# summary(mod_duration_exg_simple_fit)
+# pp_check(mod_duration_exg_simple_fit)
+
+#Exgaussian didn't converge weirdly... lognormal fits well! :)
+
+```
+
+
+## Post questionnaire
+
+### Post: Data preps
+
+```{r Post.datapreps}
+
+data_post <- readRDS("LikertvsVAS-main/Files/data_PostQuestions.RDS")
+data_post
+table(data_post[complete.cases(data_post),]$Group)
+```
+
+### Post: Model fitting
+
+```{r Post.Fit}
+
+model_post <- bf(mvbind(ExpNotif, Burden, Freq, Clear, KnowAnswer, Infl) ~ Group,
+                 disc ~ Group)
+
+model_post_fit <- brm(model_post,
+                      data = data_post,
+                      family = cumulative(logit),
+                      cores = 3,
+                      chains = 3,
+                      control=list(adapt_delta=0.99,
+                                 max_treedepth = 30))
+
+save(model_post_fit,
+     file = "model_post_fit.Rdata")
+
+```
+
+
+## Objects export
+
+```{r export}
+
+## Import fitted models
+
+
+load("mod_Mean_zib_noLiktoVAS_fit.Rdata")
+load("mod_SD_zib_noLiktoVAS_fit.Rdata")
+load("mod_CorLag0_beta_noLiktoVAS_fit.Rdata")
+load("mod_Skew_noLiktoVAS_fit.Rdata")
+load("mod_RMSSD_zib_noLiktoVAS_fit.Rdata")
+load("mod_AR_noLiktoVAS_fit.Rdata")
+load("mod_Modality_noLiktoVAS_fit.Rdata")
+load("mod_Mean_zib_fit.Rdata")
+load("Model_BSI_group_fixed_fit.Rdata")
+load("mod_IEB_noLiktoVAS_fit.Rdata")
+
+
+##Unnessecary after objects import
+pp_Mean <- pp_check(mod_Mean_zib_noLiktoVAS_fit, ndraws = 30) +
+  labs(title = "Means")
+pp_SD <- pp_check(mod_SD_zib_noLiktoVAS_fit, ndraws = 30) +
+  labs(title = "Standard deviations")
+pp_CorLag0 <- pp_check(mod_CorLag0_beta_noLiktoVAS_fit, ndraws = 30) +
+  labs(title = "Average interitem correlations")
+pp_Skew <- pp_check(mod_Skew_noLiktoVAS_fit, ndraws = 30) +
+  labs(title = "Skewnesses")
+pp_RMSSD <- pp_check(mod_RMSSD_zib_noLiktoVAS_fit, ndraws = 30) +
+  labs(title = "RMSSD")
+pp_AR <- pp_check(mod_AR_noLiktoVAS_fit, ndraws = 30) +
+  labs(title = "Autocorrelations")
+pp_IEB <- pp_check(mod_IEB_noLiktoVAS_fit, ndraws = 30) +
+  labs(title = "Initial elevation bias")
+pp_Mean_mapping <- pp_check(mod_Mean_zib_fit, ndraws = 30) +
+  labs(title = "Means with VAS mapped to LIkert")
+pp_Modality <- pp_check(mod_Modality_noLiktoVAS_fit, ndraws = 30, type = "bars_grouped", group = "format") +
+  labs(title = "Modality")
+
+##Unneccesary after objects import
+posterior_Mean <- mod_Mean_zib_noLiktoVAS_fit %>%
+  gather_draws(`b_.*`, regex = TRUE) %>%
+  mutate(component = ifelse(str_detect(.variable, "phi_"), "Precision", ifelse(str_detect(.variable, "zi_"), "Zero", "Mean")),
+         intercept = str_detect(.variable, "Intercept"),
+         Model = "Mean")
+
+posterior_SD <- mod_SD_zib_noLiktoVAS_fit %>%
+  gather_draws(`b_.*`, regex = TRUE) %>%
+  mutate(component = ifelse(str_detect(.variable, "phi_"), "Precision", ifelse(str_detect(.variable, "zi_"), "Zero", "Mean")),
+         intercept = str_detect(.variable, "Intercept"),
+         Model = "SD")
+
+posterior_CorLag0 <- mod_CorLag0_beta_noLiktoVAS_fit %>%
+  gather_draws(`b_.*`, regex = TRUE) %>%
+  mutate(component = ifelse(str_detect(.variable, "phi_"), "Precision", "Mean"),
+         intercept = str_detect(.variable, "Intercept"),
+         Model = "CorLag0")
+
+posterior_Skew <- mod_Skew_noLiktoVAS_fit %>%
+  gather_draws(`b_.*`, regex = TRUE) %>%
+  mutate(component = ifelse(str_detect(.variable, "sigma_"), "Variance", "Mean"),
+         intercept = str_detect(.variable, "Intercept"),
+         Model = "Skew")
+
+posterior_RMSSD <- mod_RMSSD_zib_noLiktoVAS_fit %>%
+  gather_draws(`b_.*`, regex = TRUE) %>%
+  mutate(component = ifelse(str_detect(.variable, "phi_"), "Precision", ifelse(str_detect(.variable, "zi_"), "Zero", "Mean")),
+         intercept = str_detect(.variable, "Intercept"),
+         Model = "RMSSD")
+
+posterior_AR <- mod_AR_noLiktoVAS_fit %>%
+  gather_draws(`b_.*`, regex = TRUE) %>%
+  mutate(component = ifelse(str_detect(.variable, "sigma_"), "Variance", "Mean"),
+         intercept = str_detect(.variable, "Intercept"),
+         Model = "AR")
+
+posterior_Mean_mapping <- mod_Mean_zib_noLiktoVAS_fit %>%
+  gather_draws(`b_.*`, regex = TRUE) %>%
+  mutate(component = ifelse(str_detect(.variable, "phi_"), "Precision", ifelse(str_detect(.variable, "zi_"), "Zero", "Mean")),
+         intercept = str_detect(.variable, "Intercept"),
+         Model = "Mean_VAS2Lik")
+
+posterior_IEB <- mod_IEB_noLiktoVAS_fit %>%
+  gather_draws(`b_.*`, regex = TRUE) %>%
+  mutate(component = ifelse(str_detect(.variable, "sigma_"), "Variance", "Mean"),
+         intercept = str_detect(.variable, "Intercept"),
+         Model = "IEB")
+
+posterior_Modality <- mod_Modality_noLiktoVAS_fit %>%
+  gather_draws(`b_.*`, regex = TRUE) %>%
+  mutate(component = ifelse(str_detect(.variable, "sigma_"), "Variance", "Mean"),
+         intercept = str_detect(.variable, "Intercept"),
+         Model = "Modality")
+
+#Unneccesary after objects import
+posterior_All1 <- rbind(posterior_Mean,
+                       posterior_SD,
+                       posterior_CorLag0,
+                       posterior_Skew) %>%
+  filter(component == "Mean")
+
+#Unneccesary after objects import
+posterior_All1 %<>%
+  mutate(.variable = fct_recode(.variable,
+                                "VAS" = "b_formatVAS",
+                                "valence" = "b_valence",
+                                "VAS:valence" = "b_formatVAS:valence",
+                                "Intercept" = "b_Intercept")) %>%
+  mutate(.variable = fct_relevel(.variable,
+                                 c("Intercept", "VAS", "valence", "VAS:valence"))) %>%
+  mutate(Model = fct_relevel(Model,
+                             c("Mean", "SD", "CorLag0", "Skew", "RMSSD", "AR"))) %>%
+  mutate(Model = fct_recode(Model,
+                            "Means" = "Mean",
+                            "Standard deviations" = "SD",
+                            "Mean item correlations" = "CorLag0",
+                            "Skewnesses" = "Skew",
+                            "RMSSD" = "RMSSD",
+                            "Autocorrelations" = "AR"))
+
+#Unneccesary after objects import
+posterior_All2 <- rbind(posterior_RMSSD,
+                       posterior_AR,
+                       posterior_Mean_mapping,
+                       posterior_IEB,
+                       posterior_Modality
+) %>%
+  filter(component == "Mean")
+
+#Unneccesary after objects import
+posterior_All2 %<>%
+  mutate(.variable = fct_recode(.variable,
+                                "VAS" = "b_formatVAS",
+                                "valence" = "b_valence",
+                                "VAS:valence" = "b_formatVAS:valence",
+                                "Intercept" = "b_Intercept")) %>%
+  mutate(.variable = fct_relevel(.variable,
+                                 c("Intercept", "VAS", "valence", "VAS:valence"))) %>%
+  mutate(Model = fct_relevel(Model,
+                             c("Mean", "SD", "CorLag0", "Skew", "RMSSD", "AR", "IEB", "Mean_Vas2LIK"))) %>%
+  mutate(Model = fct_recode(Model,
+                            "Means" = "Mean",
+                            "Standard deviations" = "SD",
+                            "Mean item correlations" = "CorLag0",
+                            "Skewnesses" = "Skew",
+                            "RMSSD" = "RMSSD",
+                            "Autocorrelations" = "AR",
+                            "IEB" = "IEB",
+                            "Means_VAS2Likert" = "Mean_VAS2Lik"))
+
+figuredata <- list(posterior_All1, posterior_All2)
+save(figuredata, file = "figuredata.Rdata")
+
+
+pp_figs <- list(pp_Mean,
+                pp_SD,
+                pp_CorLag0,
+                pp_Skew,
+                pp_RMSSD,
+                pp_AR,
+                pp_Modality,
+                pp_IEB,
+                pp_Mean_mapping)
+
+save(pp_figs, file = "pp_figs.Rdata")
+
+models_fitted <- list(mod_Mean_zib_noLiktoVAS_fit,
+                      mod_SD_zib_noLiktoVAS_fit,
+                      mod_CorLag0_beta_noLiktoVAS_fit,
+                      mod_Skew_noLiktoVAS_fit,
+                      mod_RMSSD_zib_noLiktoVAS_fit,
+                      mod_AR_noLiktoVAS_fit,
+                      mod_Modality_noLiktoVAS_fit,
+                      mod_Mean_zib_fit,
+                      mod_IEB_noLiktoVAS_fit)
+
+save(models_fitted, file = "models_fitted.Rdata")
+
+## Export variances results
+
+posterior_Variances <- rbind(posterior_Mean,
+                       posterior_SD,
+                       posterior_CorLag0,
+                       posterior_Skew,
+                       posterior_RMSSD,
+                       posterior_AR,
+                       posterior_IEB) %>%
+  filter(component == "Mean" | component == "Precision" | component == "Variance")
+
+save(posterior_Variances, file = "posterior_Variances.Rdata")
+
+```

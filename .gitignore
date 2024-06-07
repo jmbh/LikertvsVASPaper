@@ -1,0 +1,11 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+Data/
+Files/data_ESM_VAS.RDS
+Files/data_ESM_Lik.RDS
+Files/data_ESM_VAS_incl.RDS
+Files/data_ESM_Lik_incl.RDS
+Figures/SanityCheck_Likert_June7th.pdf
+Figures/SanityCheck_VAS_June7th.pdf
