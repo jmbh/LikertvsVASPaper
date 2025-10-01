@@ -18,7 +18,8 @@ We are not allowed to share the raw data openly in accordance with the data shar
 
 ### Folders & Files
 
-- `Data` is a folder with the raw data, which we are not allowed to share openly in accordance with the data sharing guidelines of the NSMD consortium. However, they can be obtained at reasonable request from Anne Roefs <a.roefs@maastrichtuniversity.nl>. 
+- `Data` is a folder with the raw data, which we are not allowed to share openly in accordance with the data sharing guidelines of the NSMD consortium. However, they can be obtained from Anne Roefs <a.roefs@maastrichtuniversity.nl>. 
+- `Materials` contains the codebook describing all variables assessed in the study
 - `Files` contains `*.RDS` files use to pass data and data aggregates between scripts
   - `data_BSI.RDS` is a data frame with subject ids and the BSI sum score
   - `data_PostQuestions.RDS` is a data frame with subject ids and six questions reflecting on the experience of filling in the ESM surveys after they are completed
